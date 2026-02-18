@@ -1,0 +1,17 @@
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: "aura-gateway"
+    static_configs:
+      - targets: ["aura-gateway:8000"]
+    metrics_path: "/metrics"
+
+  - job_name: "historian-agent"
+    static_configs:
+      - targets: ["historian:8001"]
+
+  - job_name: "negotiator-agent"
+    static_configs:
+      - targets: ["negotiator:8002"]
