@@ -47,11 +47,12 @@ A high-performance hospitality AI system powered by a **Cognitive Swarm** -- a d
 
 1. **Twilio** streams audio to the Aura Gateway via WebSocket.
 2. **ElevenLabs STT** converts audio to text.
-3. **Aura Gateway** publishes the transcript to Kafka (`swarm.transcripts`).
-4. **Historian Agent** consumes the transcript, queries the VIP Vault, and writes a `guest_context` whisper to Redis.
-5. **Negotiator Agent** evaluates booking intent and writes a `strategy_hint` whisper to Redis.
-6. **Aura Gateway** reads the Redis Whisper Bus and generates a final response.
-7. **ElevenLabs TTS** synthesizes audio and sends it back through Twilio.
+3. **Aura Gateway** publishes the transcript to Kafka (`swarm.transcripts`) with `tenant_id`.
+4. **Historian Agent** consumes the transcript, queries the VIP Vault, stores vector embeddings, performs KNN recall of deep memories, and writes a `guest_context` whisper to Redis.
+5. **Negotiator Agent** evaluates booking intent, identifies Full House events, calculates seating alternatives, and writes a `strategy_hint` whisper to Redis.
+6. **Sommelier Agent** detects ingredient/pairing intent, filters menu with allergen family expansion, finds wine pairings by flavor profile, and writes a `menu_suggestion` whisper to Redis.
+7. **Aura Gateway** reads the Redis Whisper Bus (all agent whispers) and generates a final response.
+8. **ElevenLabs TTS** synthesizes audio and sends it back through Twilio.
 
 ---
 
@@ -59,13 +60,14 @@ A high-performance hospitality AI system powered by a **Cognitive Swarm** -- a d
 
 | Service | Container | Port | Description |
 |---|---|---|---|
-| **Aura Gateway** | `aura-gateway` | `8000` | FastAPI application. WebSocket media relay, Kafka publisher, Whisper Bus reader, Prometheus metrics. |
-| **Historian Agent** | `aura-historian` | `8001` (metrics) | Kafka consumer on `swarm.transcripts`. Performs VIP Identity Vault lookups and writes `guest_context` whispers. |
-| **Negotiator Agent** | `aura-negotiator` | `8002` (metrics) | Intent analyzer and booking strategy engine. Writes `strategy_hint` whispers with tactical suggestions. |
-| **Redis Stack** | `aura-redis` | `6379` | Whisper Bus (Redis Streams) + VIP Identity Vault (RedisJSON). |
+| **Aura Gateway** | `aura-gateway` | `8000` | FastAPI application. WebSocket media relay, Kafka publisher, Whisper Bus reader, Prometheus metrics. Multi-tenant aware. |
+| **Historian Agent** | `aura-historian` | `8001` (metrics) | Kafka consumer. VIP Vault lookups, vector embedding storage, KNN deep context recall. Writes `guest_context` whispers with deep memories. |
+| **Negotiator Agent** | `aura-negotiator` | `8002` (metrics) | Intent analyzer and booking strategy engine. Inventory-aware seating alternatives (bar, high-top, patio, private). Writes `strategy_hint` whispers. |
+| **Sommelier Agent** | `aura-sommelier` | `8003` (metrics) | Ingredient-level reasoning engine. Allergen family expansion, menu filtering, wine pairing by flavor profile. Writes `menu_suggestion` whispers. |
+| **Redis Stack** | `aura-redis` | `6379` | Whisper Bus (Streams) + VIP Vault (RedisJSON) + Vector Memory (RediSearch) + Menu Store (RedisJSON). |
 | **Kafka** | `aura-kafka` | `9092` | Durable event backbone. Topics: `swarm.transcripts`, `swarm.reasoning`. |
 | **Zookeeper** | `aura-zookeeper` | `2181` | Kafka coordination. |
-| **Prometheus** | `aura-prometheus` | `9090` | Metrics scraping from all agent services. |
+| **Prometheus** | `aura-prometheus` | `9090` | Metrics scraping from all agent services (4 targets). |
 | **Grafana** | `aura-grafana` | `3000` | Pre-provisioned observability dashboard. |
 
 All services communicate over the private `aura-net` Docker bridge network.
@@ -98,7 +100,7 @@ All services communicate over the private `aura-net` Docker bridge network.
 docker compose up --build -d
 ```
 
-This starts all 8 services. Verify with:
+This starts all 9 services. Verify with:
 
 ```bash
 docker compose ps
@@ -106,14 +108,17 @@ docker compose ps
 
 All containers should report `healthy` or `running` status.
 
-### 2. Seed the VIP Identity Vault
+### 2. Seed Data
 
 ```bash
-pip install redis
+pip install redis numpy
 python scripts/seed_data.py
+python scripts/seed_menu.py
 ```
 
-This loads 5 VIP guest profiles into the RedisJSON vault:
+This loads 5 VIP guest profiles and 14 structured menu items into Redis.
+
+**VIP Guests:**
 
 | Guest | Phone | Preferences |
 |---|---|---|
@@ -123,19 +128,22 @@ This loads 5 VIP guest profiles into the RedisJSON vault:
 | Sophia | +15553334444 | White wine, Sancerre, garden patio, vegetarian |
 | Alexander | +15557778888 | Red wine, Brunello, corner booth, tasting menu |
 
-### 3. Run the Julian Test
+### 3. Run Tests
 
+**Julian Test** (Warm Recognition):
 ```bash
 pip install httpx
 python scripts/julian_test.py
 ```
 
-This end-to-end test simulates a call from Julian (+15551234567) and validates:
-- Warm recognition (greeted by name)
-- Preference recall (red wine suggestion)
-- Response latency < 400ms
-- Reasoning trace logged to Kafka
-- Unknown callers receive a generic greeting
+Validates: warm recognition, preference recall, latency < 400ms, reasoning traces.
+
+**Onion Test** (Allergen Safety):
+```bash
+python scripts/onion_test.py
+```
+
+Validates: 0% false positives on allergen filtering, allergen family expansion, latency < 150ms, intent detection accuracy, wine pairing logic.
 
 ### 4. Access the Dashboards
 
@@ -208,10 +216,10 @@ Agents do **not** call each other directly. Instead, they modify the shared envi
 
 | Type | Producer | Description |
 |---|---|---|
-| `guest_context` | Historian | Guest identity, preferences, and historical context |
-| `strategy_hint` | Negotiator | Tactical booking suggestions and upsell opportunities |
+| `guest_context` | Historian | Guest identity, preferences, deep vector memories, and historical context |
+| `strategy_hint` | Negotiator | Tactical booking suggestions, seating alternatives, and upsell opportunities |
 | `sentiment` | Gateway | Caller sentiment score |
-| `menu_suggestion` | Sommelier (Phase 2) | Wine and menu recommendations |
+| `menu_suggestion` | Sommelier | Ingredient filtering results, wine pairings, and menu recommendations |
 
 ### VIP Identity Vault
 
@@ -232,12 +240,37 @@ Guest profiles are stored in RedisJSON at keys `aura:guest:{phone_number}`:
 }
 ```
 
+### Sommelier Agent (Phase 2)
+
+The Sommelier provides ingredient-level reasoning with three capabilities:
+
+**Allergen Family Expansion:** When a guest says "no onions," the Sommelier expands the filter to the entire allium family (onion, shallot, garlic, leek, chive, scallion, spring onion). 15 allergen families are defined: allium, nightshade, tree_nut, peanut, dairy, gluten, shellfish, fish, egg, soy, sesame, sulfite, celery, mustard, cilantro.
+
+**Wine Pairing by Flavor Profile:** Menu items are tagged with flavor categories (rich_savory, bright_acidic, creamy_mild, spicy_bold, sweet_aromatic, herbaceous, briny_oceanic). The Sommelier maps these to expert wine recommendations with reasoning.
+
+**Safety-First:** If an ingredient has no known allergen family, the filter applies it as an exact match and warns the user. Unknown ingredients are never silently ignored.
+
+### Semantic Vector Memory (Phase 2)
+
+The Historian stores every transcript as a 128-dimensional vector embedding in RediSearch. On each inbound call, it performs KNN (K-Nearest Neighbor) search to recall related past interactions -- anniversaries, preferences, complaints -- and includes them as `deep_memories` in the whisper. Vectors are tagged with `tenant_id` and `caller_id` for strict multi-tenant isolation.
+
+### Multi-Tenant Architecture (Phase 2)
+
+All services accept a `TENANT_ID` environment variable. Tenant isolation is enforced at:
+- **Kafka events:** Every transcript includes `tenant_id` for downstream filtering.
+- **Redis vectors:** All embeddings are tagged with `tenant_id` and filtered in KNN queries.
+- **Redis keys:** Menu items and guest profiles use tenant-aware key prefixes.
+
+### Inventory-Aware Negotiation (Phase 2)
+
+The Negotiator now understands 5 seating types (Main Dining Room, Bar, High-Top, Patio, Private Dining Room) with capacity and revenue priority. When the dining room is full, it suggests revenue-positive alternatives: bar seating, high-tops, later time slots, or the private room for large parties.
+
 ### Event Backbone (Kafka)
 
 Two topics power the durable reasoning layer:
 
-- **`swarm.transcripts`** -- Every inbound/outbound utterance with session ID, caller number, and timestamp.
-- **`swarm.reasoning`** -- Agent decision traces (what the Historian found, what the Negotiator decided, and processing latency).
+- **`swarm.transcripts`** -- Every inbound/outbound utterance with session ID, caller number, tenant_id, and timestamp.
+- **`swarm.reasoning`** -- Agent decision traces (what each agent found/decided, and processing latency).
 
 ---
 
@@ -261,7 +294,7 @@ The pre-provisioned "Aura Cognitive Swarm" dashboard includes:
 
 ```
 project-aura/
-├── docker-compose.yml              # 8-service swarm definition
+├── docker-compose.yml              # 9-service swarm definition
 ├── .env.example                     # Environment variable template
 ├── pyproject.toml                   # Python project config (ruff, mypy)
 ├── gateway/
@@ -276,19 +309,26 @@ project-aura/
 │   │   ├── Dockerfile
 │   │   ├── requirements.txt
 │   │   └── app/
-│   │       └── main.py              # Kafka consumer, VIP lookup, whisper writer
-│   └── negotiator/
+│   │       ├── main.py              # Kafka consumer, VIP lookup, vector memory, whisper writer
+│   │       └── vector_memory.py     # Vector embeddings, RediSearch KNN, deep context recall
+│   ├── negotiator/
+│   │   ├── Dockerfile
+│   │   ├── requirements.txt
+│   │   └── app/
+│   │       └── main.py              # Intent analyzer, inventory-aware strategy engine
+│   └── sommelier/
 │       ├── Dockerfile
 │       ├── requirements.txt
 │       └── app/
-│           └── main.py              # Intent analyzer, strategy engine
+│           ├── main.py              # Kafka consumer, menu filtering, wine pairing
+│           └── ontology.py          # Allergen families, flavor profiles, wine pairing maps
 ├── shared/
 │   ├── models.py                    # Dataclasses (Whisper, GuestProfile, TranscriptEvent)
 │   ├── redis_utils.py               # Redis connection, Whisper Bus, VIP Vault helpers
 │   └── kafka_utils.py               # Kafka producer/consumer, topic management
 ├── monitoring/
 │   ├── prometheus/
-│   │   └── prometheus.yml           # Scrape config for all agents
+│   │   └── prometheus.yml           # Scrape config for all agents (4 targets)
 │   └── grafana/
 │       └── provisioning/
 │           ├── datasources/
@@ -298,7 +338,9 @@ project-aura/
 │               └── aura-swarm.json  # Full dashboard definition
 └── scripts/
     ├── seed_data.py                 # VIP guest profile seeder
-    └── julian_test.py               # End-to-end warm recognition test
+    ├── seed_menu.py                 # Restaurant menu seeder (14 items)
+    ├── julian_test.py               # End-to-end warm recognition test
+    └── onion_test.py                # Allergen filtering safety test
 ```
 
 ---
@@ -313,6 +355,7 @@ cp .env.example .env
 
 | Variable | Required | Description |
 |---|---|---|
+| `TENANT_ID` | Optional | Tenant namespace identifier (default: `default`) |
 | `TWILIO_ACCOUNT_SID` | For live calls | Twilio account SID |
 | `TWILIO_AUTH_TOKEN` | For live calls | Twilio auth token |
 | `TWILIO_PHONE_NUMBER` | For live calls | Your Twilio phone number |
@@ -342,6 +385,8 @@ The simulate-call API and Julian Test work without any external API keys.
 | Voice round-trip latency | < 500ms | Gateway -> Agent -> Response |
 | VIP vault lookup | < 100ms | Historian -> Redis |
 | Historian whisper latency | < 150ms | Kafka consume -> Redis write |
+| Sommelier menu filtering | < 150ms | Intent detect -> filter -> whisper |
+| Allergen false positive rate | 0% | Onion Test validation |
 | Concurrent calls (MVP) | 50 | Docker Compose baseline |
 
 ---
@@ -350,9 +395,10 @@ The simulate-call API and Julian Test work without any external API keys.
 
 | Phase | Focus | Status |
 |---|---|---|
-| **Phase 1** | Containerized swarm, Whisper Bus, VIP Vault, Historian, Negotiator, Observability | Current |
-| **Phase 2** | Sommelier Agent, live Twilio/ElevenLabs integration, AutoGen v0.4 agent framework | Planned |
-| **Phase 3** | Cryptographic ownership, multi-region failover, HITL for edge cases | Deferred |
+| **Phase 1** | Containerized swarm, Whisper Bus, VIP Vault, Historian, Negotiator, Observability | Complete |
+| **Phase 2** | Sommelier Agent, vector memory, multi-tenant isolation, inventory-aware negotiation, Onion Test | Current |
+| **Phase 3** | Live Twilio/ElevenLabs integration, SaaS Portal, Redis Clustering | Planned |
+| **Phase 4** | Cryptographic agent ownership, multi-region failover, HITL for edge cases | Deferred |
 
 ---
 

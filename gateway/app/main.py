@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -34,8 +35,10 @@ logger = logging.getLogger("aura-gateway")
 
 REDIS_HOST = "redis"
 REDIS_PORT = 6379
+TENANT_ID = os.getenv("TENANT_ID", "default")
 WHISPER_STREAM_KEY = "aura:whisper_bus"
 GUEST_KEY_PREFIX = "aura:guest:"
+MENU_KEY_PREFIX = "aura:menu:"
 TRANSCRIPT_TOPIC = "swarm.transcripts"
 REASONING_TOPIC = "swarm.reasoning"
 
@@ -240,6 +243,7 @@ def _publish_transcript(session_id: str, caller: str, text: str, direction: str)
         "caller_number": caller,
         "text": text,
         "direction": direction,
+        "tenant_id": TENANT_ID,
         "timestamp": time.time(),
     }
     kafka_producer.produce(
@@ -285,33 +289,51 @@ def _generate_response(
     profile: dict | None,
 ) -> str:
     context_parts = [greeting]
+    sommelier_hint = ""
+    strategy_hint = ""
+    deep_memories: list[str] = []
 
     for w in whispers:
         wtype = w.get("whisper_type", "")
         payload = w.get("payload", {})
         if wtype == "guest_context":
             context_parts.append(f"[Context: {payload.get('summary', '')}]")
+            if payload.get("deep_memories"):
+                deep_memories = payload["deep_memories"]
         elif wtype == "strategy_hint":
-            context_parts.append(f"[Strategy: {payload.get('suggestion', '')}]")
+            strategy_hint = payload.get("suggestion", "")
+            context_parts.append(f"[Strategy: {strategy_hint}]")
         elif wtype == "menu_suggestion":
-            context_parts.append(f"[Sommelier: {payload.get('recommendation', '')}]")
+            sommelier_hint = payload.get("recommendation", "")
+            context_parts.append(f"[Sommelier: {sommelier_hint}]")
 
     if profile:
         name = profile.get("name", "guest")
         tags = profile.get("preference_tags", [])
         if any(kw in user_text.lower() for kw in ["reservation", "book", "table"]):
-            return (
-                f"Of course, {name}! I'd love to arrange that for you. "
-                f"Your preferred table is available. Shall I confirm?"
-            )
+            base = f"Of course, {name}! I'd love to arrange that for you. Your preferred table is available. Shall I confirm?"
+            if strategy_hint:
+                base += f" {strategy_hint}"
+            return base
         if any(kw in user_text.lower() for kw in ["wine", "drink", "beverage"]):
+            if sommelier_hint:
+                return f"{name}, {sommelier_hint}"
             if "red wine" in tags:
                 return (
                     f"Excellent taste as always, {name}. "
                     f"I have a wonderful Barolo that I think you'll adore."
                 )
             return f"I'd be happy to recommend something special for you, {name}."
+        if any(kw in user_text.lower() for kw in ["no ", "without", "allerg", "can't eat", "intoleran"]):
+            if sommelier_hint:
+                return f"Absolutely, {name}. {sommelier_hint}"
+        if deep_memories:
+            return f"Welcome back, {name}. I remember your last visit. {context_parts[-1] if len(context_parts) > 1 else ''}".strip()
         return f"Absolutely, {name}. I'm here to make your experience perfect."
+
+    if any(kw in user_text.lower() for kw in ["no ", "without", "allerg"]):
+        if sommelier_hint:
+            return f"Of course! {sommelier_hint}"
 
     return "I'd be delighted to help you. Could you tell me a bit more about what you're looking for?"
 

@@ -66,6 +66,7 @@ services:
       REDIS_HOST: redis
       REDIS_PORT: 6379
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      TENANT_ID: ${TENANT_ID:-default}
       TWILIO_ACCOUNT_SID: ${TWILIO_ACCOUNT_SID:-}
       TWILIO_AUTH_TOKEN: ${TWILIO_AUTH_TOKEN:-}
       ELEVENLABS_API_KEY: ${ELEVENLABS_API_KEY:-}
@@ -90,6 +91,7 @@ services:
       REDIS_HOST: redis
       REDIS_PORT: 6379
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      TENANT_ID: ${TENANT_ID:-default}
     depends_on:
       redis:
         condition: service_healthy
@@ -109,6 +111,29 @@ services:
       REDIS_HOST: redis
       REDIS_PORT: 6379
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      TENANT_ID: ${TENANT_ID:-default}
+    depends_on:
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    networks:
+      - aura-net
+    restart: unless-stopped
+
+  # --- Sommelier Agent ---
+  sommelier:
+    build:
+      context: ./agents/sommelier
+      dockerfile: Dockerfile
+    container_name: aura-sommelier
+    ports:
+      - "8003:8003"
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      TENANT_ID: ${TENANT_ID:-default}
     depends_on:
       redis:
         condition: service_healthy
