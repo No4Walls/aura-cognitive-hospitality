@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import logging
+import math
+import struct
 import time
 
-import numpy as np
 import redis
 from redis.commands.search.field import TagField, TextField, VectorField
 from redis.commands.search.indexDefinition import IndexDefinition, IndexType
@@ -21,11 +22,11 @@ DISTANCE_METRIC = "COSINE"
 
 
 def _text_to_embedding(text: str) -> list[float]:
-    embedding = np.array(embed_text(text), dtype=np.float32)
-    norm = np.linalg.norm(embedding)
+    raw = embed_text(text)
+    norm = math.sqrt(sum(v * v for v in raw))
     if norm > 0:
-        embedding = embedding / norm
-    return embedding.tolist()
+        return [v / norm for v in raw]
+    return raw
 
 
 def ensure_vector_index(r: redis.Redis) -> None:
@@ -115,7 +116,7 @@ def knn_search(
     k: int = 5,
 ) -> list[dict]:
     embedding = _text_to_embedding(query_text)
-    embedding_bytes = np.array(embedding, dtype=np.float32).tobytes()
+    embedding_bytes = struct.pack(f"{len(embedding)}f", *embedding)
 
     filter_parts = [f"@tenant_id:{{{tenant_id}}}"]
     if caller_id:

@@ -25,6 +25,7 @@ from shared.redis_utils import (
     publish_whisper,
     GUEST_KEY_PREFIX,
 )
+from shared.gemini_utils import warmup as warmup_gemini
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [historian] %(levelname)s: %(message)s")
 logger = logging.getLogger("historian")
@@ -142,6 +143,7 @@ def run() -> None:
     except Exception as exc:
         logger.warning("Vector index setup deferred: %s", exc)
 
+    warmup_gemini()
     logger.info("Historian agent running (tenant=%s). Listening for transcripts...", TENANT_ID)
 
     while not _shutdown:

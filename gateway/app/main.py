@@ -31,7 +31,7 @@ from shared.redis_utils import (
     GUEST_KEY_PREFIX,
     async_connect_redis,
 )
-from shared.gemini_utils import generate_text
+from shared.gemini_utils import generate_text, warmup as warmup_gemini
 
 import redis
 from confluent_kafka import Producer
@@ -61,6 +61,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     except Exception:
         logger.error("Failed to connect to Kafka after retries")
 
+    warmup_gemini()
     logger.info("Aura Gateway ready")
     yield
 
@@ -246,12 +247,14 @@ async def _collect_whispers(session_id: str) -> list[dict]:
     if not redis_client:
         return []
     session_key = f"aura:whispers:{session_id}"
+    logger.debug("Polling whispers from key=%s (max %dms)", session_key, WHISPER_MAX_WAIT_MS)
     whispers: list[dict] = []
     elapsed_ms = 0
     try:
         while elapsed_ms < WHISPER_MAX_WAIT_MS:
             raw = redis_client.lrange(session_key, 0, -1)
             if raw:
+                logger.info("Collected %d whisper(s) from %s after %dms", len(raw), session_key, elapsed_ms)
                 for item in raw:
                     data = json.loads(item)
                     WHISPER_COUNT.labels(
@@ -270,11 +273,14 @@ async def _collect_whispers(session_id: str) -> list[dict]:
             await asyncio.sleep(WHISPER_POLL_INTERVAL_MS / 1000)
             elapsed_ms += WHISPER_POLL_INTERVAL_MS
         if elapsed_ms >= WHISPER_MAX_WAIT_MS:
-            logger.info("Whisper poll timeout for session %s after %dms", session_id, elapsed_ms)
+            logger.warning(
+                "Whisper poll timeout for session %s (key=%s) after %dms — agents may still be processing",
+                session_id, session_key, elapsed_ms,
+            )
         redis_client.delete(session_key)
         return whispers
     except Exception as exc:
-        logger.warning("Whisper collection failed: %s", exc)
+        logger.warning("Whisper collection failed for %s: %s", session_key, exc)
         return []
 
 

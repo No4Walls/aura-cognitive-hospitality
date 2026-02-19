@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import logging
 import os
 import threading
 
 from google import genai
 from google.genai import types
+
+logger = logging.getLogger(__name__)
 
 _DEFAULT_EMBEDDING_MODEL = os.getenv("GEMINI_EMBEDDING_MODEL", "text-embedding-004")
 _DEFAULT_GENERATIVE_MODEL = os.getenv("GEMINI_GENERATIVE_MODEL", "gemini-3-flash")
@@ -78,6 +81,20 @@ def default_safety_settings() -> list[types.SafetySetting]:
             threshold=types.HarmBlockThreshold.BLOCK_NONE,
         ),
     ]
+
+
+def warmup() -> None:
+    if not _api_keys:
+        logger.warning("No GOOGLE_API_KEY set; skipping Gemini warm-up")
+        return
+    try:
+        client = get_client()
+        client.models.embed_content(
+            model=_DEFAULT_EMBEDDING_MODEL, contents="warmup",
+        )
+        logger.info("Gemini warm-up complete (embedding model ready)")
+    except Exception as exc:
+        logger.warning("Gemini warm-up failed: %s", exc)
 
 
 def embed_text(text: str, model: str | None = None) -> list[float]:
