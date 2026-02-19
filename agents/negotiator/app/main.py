@@ -298,7 +298,10 @@ def publish_whisper(r: redis.Redis, session_id: str, strategy: dict) -> None:
         "payload": json.dumps(strategy),
         "timestamp": str(time.time()),
     }
-    r.xadd(WHISPER_STREAM_KEY, entry)
+    r.xadd(WHISPER_STREAM_KEY, entry, maxlen=10000, approximate=True)
+    session_key = f"aura:whispers:{session_id}"
+    r.rpush(session_key, json.dumps(entry))
+    r.expire(session_key, 300)
     STRATEGIES_PUBLISHED.inc()
     logger.info("Strategy whisper published for session %s: %s", session_id, strategy["action"])
 

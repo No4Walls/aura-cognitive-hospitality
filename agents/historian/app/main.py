@@ -157,7 +157,10 @@ def publish_whisper(
         "payload": json.dumps(payload),
         "timestamp": str(time.time()),
     }
-    r.xadd(WHISPER_STREAM_KEY, entry)
+    r.xadd(WHISPER_STREAM_KEY, entry, maxlen=10000, approximate=True)
+    session_key = f"aura:whispers:{session_id}"
+    r.rpush(session_key, json.dumps(entry))
+    r.expire(session_key, 300)
     WHISPERS_PUBLISHED.inc()
     logger.info("Whisper published for session %s", session_id)
 

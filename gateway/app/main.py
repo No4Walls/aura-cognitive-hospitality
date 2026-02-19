@@ -15,7 +15,6 @@ from prometheus_client import make_asgi_app
 
 from gateway.app.config import (
     KAFKA_BOOTSTRAP_SERVERS,
-    WHISPER_POLL_TIMEOUT_MS,
 )
 from gateway.app.metrics import (
     ACTIVE_CALLS,
@@ -178,9 +177,7 @@ async def simulate_call(request: Request) -> JSONResponse:
 
     _publish_transcript(session_id, caller, text, "inbound")
 
-    await asyncio.sleep(WHISPER_POLL_TIMEOUT_MS / 1000)
-
-    whispers = _collect_whispers(session_id)
+    whispers = await _collect_whispers(session_id)
 
     response_text = _generate_response(greeting, text, whispers, profile)
 
@@ -255,27 +252,40 @@ def _publish_transcript(session_id: str, caller: str, text: str, direction: str)
     KAFKA_EVENTS.labels(topic=TRANSCRIPT_TOPIC).inc()
 
 
-def _collect_whispers(session_id: str) -> list[dict]:
+WHISPER_MAX_WAIT_MS = 400
+WHISPER_POLL_INTERVAL_MS = 25
+
+
+async def _collect_whispers(session_id: str) -> list[dict]:
     if not redis_client:
         return []
+    session_key = f"aura:whispers:{session_id}"
+    whispers: list[dict] = []
+    elapsed_ms = 0
     try:
-        raw = redis_client.xrevrange(WHISPER_STREAM_KEY, count=20)
-        whispers = []
-        for msg_id, data in raw:
-            if data.get("session_id") == session_id:
-                WHISPER_COUNT.labels(
-                    agent=data.get("agent", "unknown"),
-                    whisper_type=data.get("whisper_type", "unknown"),
-                ).inc()
-                whispers.append(
-                    {
-                        "id": msg_id,
-                        "agent": data["agent"],
-                        "whisper_type": data["whisper_type"],
-                        "payload": json.loads(data.get("payload", "{}")),
-                        "timestamp": float(data.get("timestamp", 0)),
-                    }
-                )
+        while elapsed_ms < WHISPER_MAX_WAIT_MS:
+            raw = redis_client.lrange(session_key, 0, -1)
+            if raw:
+                for item in raw:
+                    data = json.loads(item)
+                    WHISPER_COUNT.labels(
+                        agent=data.get("agent", "unknown"),
+                        whisper_type=data.get("whisper_type", "unknown"),
+                    ).inc()
+                    whispers.append(
+                        {
+                            "agent": data["agent"],
+                            "whisper_type": data["whisper_type"],
+                            "payload": json.loads(data.get("payload", "{}")),
+                            "timestamp": float(data.get("timestamp", 0)),
+                        }
+                    )
+                break
+            await asyncio.sleep(WHISPER_POLL_INTERVAL_MS / 1000)
+            elapsed_ms += WHISPER_POLL_INTERVAL_MS
+        if elapsed_ms >= WHISPER_MAX_WAIT_MS:
+            logger.info("Whisper poll timeout for session %s after %dms", session_id, elapsed_ms)
+        redis_client.delete(session_key)
         return whispers
     except Exception as exc:
         logger.warning("Whisper collection failed: %s", exc)

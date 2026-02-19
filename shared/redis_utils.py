@@ -35,7 +35,7 @@ def publish_whisper(
         "payload": json.dumps(payload),
         "timestamp": str(time.time()),
     }
-    message_id: str = client.xadd(WHISPER_STREAM_KEY, entry)
+    message_id: str = client.xadd(WHISPER_STREAM_KEY, entry, maxlen=10000, approximate=True)
     return message_id
 
 
