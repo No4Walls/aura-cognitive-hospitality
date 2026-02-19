@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
 
 import redis
@@ -93,6 +94,13 @@ def connect_kafka() -> Consumer:
     raise ConnectionError("Failed to connect to Kafka")
 
 
+_TIME_PATTERN = re.compile(r"(\d{1,2})(?::(\d{2}))?\s*(?:(am|pm))", re.IGNORECASE)
+_PARTY_SIZE_PATTERN = re.compile(
+    r"(?:party\s+of|table\s+for|group\s+of|seating\s+for|seat\s+for|seats?\s+for|for\s+a\s+party\s+of)\s+(\d{1,2})",
+    re.IGNORECASE,
+)
+
+
 def analyze_intent(text: str) -> dict | None:
     text_lower = text.lower()
     intent: dict = {"type": None, "details": {}}
@@ -108,21 +116,20 @@ def analyze_intent(text: str) -> dict | None:
         intent["details"]["requested_day"] = requested_day
 
         requested_time = None
-        if "7" in text_lower and ("pm" in text_lower or "evening" in text_lower):
-            requested_time = "7:00 PM"
-        elif "8" in text_lower:
-            requested_time = "8:00 PM"
-        elif "6" in text_lower:
-            requested_time = "6:00 PM"
-        elif "9" in text_lower:
-            requested_time = "9:00 PM"
+        time_match = _TIME_PATTERN.search(text_lower)
+        if time_match:
+            hour = int(time_match.group(1))
+            minutes = time_match.group(2) or "00"
+            period = time_match.group(3).upper()
+            requested_time = f"{hour}:{minutes} {period}"
         intent["details"]["requested_time"] = requested_time
 
         party_size = None
-        for word in text_lower.split():
-            if word.isdigit() and 1 <= int(word) <= 20:
-                party_size = int(word)
-                break
+        size_match = _PARTY_SIZE_PATTERN.search(text_lower)
+        if size_match:
+            size = int(size_match.group(1))
+            if 1 <= size <= 20:
+                party_size = size
         intent["details"]["party_size"] = party_size
 
         return intent
@@ -161,7 +168,7 @@ def _find_seating_alternatives(day: str, requested_time: str | None) -> list[dic
                 "time": slot,
                 "seating": info["label"],
                 "seating_type": seating_type,
-                "revenue_score": REVENUE_PRIORITY.index(seating_type) + 1,
+                "revenue_score": len(REVENUE_PRIORITY) - REVENUE_PRIORITY.index(seating_type),
             })
         if len(alternatives) >= 4:
             break

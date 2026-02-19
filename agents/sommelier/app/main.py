@@ -83,7 +83,17 @@ def connect_kafka() -> Consumer:
     raise ConnectionError("Failed to connect to Kafka")
 
 
+_menu_cache: list[dict] = []
+_menu_cache_ts: float = 0.0
+MENU_CACHE_TTL_S = 60
+
+
 def load_menu(r: redis.Redis) -> list[dict]:
+    global _menu_cache, _menu_cache_ts
+    now = time.time()
+    if _menu_cache and (now - _menu_cache_ts) < MENU_CACHE_TTL_S:
+        return _menu_cache
+
     menu_items = []
     cursor = 0
     while True:
@@ -94,6 +104,12 @@ def load_menu(r: redis.Redis) -> list[dict]:
                 menu_items.append(item[0])
         if cursor == 0:
             break
+
+    if menu_items:
+        _menu_cache = menu_items
+        _menu_cache_ts = now
+        logger.info("Menu cache refreshed: %d items", len(menu_items))
+
     return menu_items
 
 
@@ -148,12 +164,13 @@ def filter_menu_by_exclusion(
     reasoning_notes: list[str] = []
 
     for term in excluded_terms:
-        family = get_allergen_family(term)
-        if family:
-            family_members = expand_allergen_to_family(term)
+        family_members = expand_allergen_to_family(term)
+        if len(family_members) > 1:
             expanded_exclusions.update(family_members)
+            family = get_allergen_family(term)
+            family_name = family if family else term.lower().strip()
             reasoning_notes.append(
-                f"'{term}' belongs to the '{family}' family. "
+                f"'{term}' is part of the '{family_name}' family. "
                 f"Expanding filter to include: {', '.join(family_members)}."
             )
         else:
