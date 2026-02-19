@@ -172,19 +172,33 @@ def run() -> None:
                 text[:80],
             )
 
-            try:
-                store_transcript_embedding(r, tenant_id, caller, session_id, text, direction)
-                EMBEDDINGS_STORED.inc()
-            except Exception as exc:
-                logger.warning("Embedding storage failed: %s", exc)
-
             if direction != "inbound":
+                try:
+                    store_transcript_embedding(r, tenant_id, caller, session_id, text, direction)
+                    EMBEDDINGS_STORED.inc()
+                except Exception as exc:
+                    logger.warning("Embedding storage failed: %s", exc)
                 continue
 
             process_start = time.time()
 
             profile = lookup_guest(r, caller)
             context = extract_context(text, profile)
+
+            if context:
+                publish_whisper(r, "historian", "guest_context", session_id, context)
+                WHISPERS_PUBLISHED.inc()
+                whisper_ms = (time.time() - process_start) * 1000
+                logger.info(
+                    "Whisper published for session=%s in %.1fms",
+                    session_id, whisper_ms,
+                )
+
+            try:
+                store_transcript_embedding(r, tenant_id, caller, session_id, text, direction)
+                EMBEDDINGS_STORED.inc()
+            except Exception as exc:
+                logger.warning("Embedding storage failed: %s", exc)
 
             deep_memories: list[dict] = []
             try:
@@ -195,17 +209,15 @@ def run() -> None:
             except Exception as exc:
                 logger.warning("Deep context recall failed: %s", exc)
 
+            if context and deep_memories:
+                memory_summaries = [
+                    m["text"][:100] for m in deep_memories if m.get("text")
+                ]
+                context["deep_memories"] = memory_summaries
+                context["memory_count"] = len(deep_memories)
+                publish_whisper(r, "historian", "deep_memory", session_id, context)
+
             if context:
-                if deep_memories:
-                    memory_summaries = [
-                        m["text"][:100] for m in deep_memories if m.get("text")
-                    ]
-                    context["deep_memories"] = memory_summaries
-                    context["memory_count"] = len(deep_memories)
-
-                publish_whisper(r, "historian", "guest_context", session_id, context)
-                WHISPERS_PUBLISHED.inc()
-
                 reasoning = {
                     "input_text": text[:200],
                     "guest_found": profile is not None,
@@ -216,7 +228,7 @@ def run() -> None:
                 publish_reasoning(producer, "historian", session_id, reasoning)
 
                 logger.info(
-                    "Processed in %.1fms (memories=%d)",
+                    "Fully processed in %.1fms (memories=%d)",
                     (time.time() - process_start) * 1000,
                     len(deep_memories),
                 )

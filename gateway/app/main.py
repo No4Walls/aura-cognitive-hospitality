@@ -166,7 +166,9 @@ async def simulate_call(request: Request) -> JSONResponse:
 
     whispers = await _collect_whispers(session_id)
 
-    response_text = _generate_response(greeting, text, whispers, profile)
+    response_text = await asyncio.to_thread(
+        _generate_response, greeting, text, whispers, profile,
+    )
 
     _publish_transcript(session_id, caller, response_text, "outbound")
 
@@ -195,14 +197,17 @@ async def simulate_call(request: Request) -> JSONResponse:
 
 def _lookup_guest(caller: str) -> dict | None:
     if not redis_client:
+        logger.warning("Guest lookup skipped: no Redis client")
         return None
+    key = f"{GUEST_KEY_PREFIX}{caller}"
     try:
-        key = f"{GUEST_KEY_PREFIX}{caller}"
         result = redis_client.json().get(key, "$")
         if result and len(result) > 0:
+            logger.info("Guest found: key=%s name=%s", key, result[0].get("name", "?"))
             return result[0]
+        logger.info("No guest profile at key=%s", key)
     except Exception as exc:
-        logger.warning("Guest lookup failed: %s", exc)
+        logger.warning("Guest lookup failed for key=%s: %s", key, exc)
     return None
 
 
