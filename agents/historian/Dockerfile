@@ -6,9 +6,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc librdkafka-dev && \
     rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt .
+COPY agents/historian/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY app/ historian/app/
+COPY shared/ shared/
+COPY agents/historian/app/ historian/app/
 
 CMD ["python", "-m", "historian.app.main"]

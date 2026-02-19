@@ -1,16 +1,22 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import time
 
 import redis
+
+logger = logging.getLogger(__name__)
 
 REDIS_HOST = os.getenv("REDIS_HOST", "redis")
 REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
 
 WHISPER_STREAM_KEY = "aura:whisper_bus"
 GUEST_KEY_PREFIX = "aura:guest:"
+MENU_KEY_PREFIX = "aura:menu:"
+WHISPER_STREAM_MAXLEN = 10000
+WHISPER_SESSION_TTL_S = 300
 
 
 def get_redis_client() -> redis.Redis:
@@ -19,6 +25,34 @@ def get_redis_client() -> redis.Redis:
         port=REDIS_PORT,
         decode_responses=True,
     )
+
+
+def connect_redis(retries: int = 30, delay: float = 2.0) -> redis.Redis:
+    for attempt in range(retries):
+        try:
+            client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
+            client.ping()
+            logger.info("Connected to Redis")
+            return client
+        except redis.ConnectionError:
+            logger.warning("Redis not ready, retrying... (attempt %d/%d)", attempt + 1, retries)
+            time.sleep(delay)
+    raise ConnectionError("Failed to connect to Redis")
+
+
+async def async_connect_redis(retries: int = 30, delay: float = 2.0) -> redis.Redis:
+    import asyncio
+
+    for attempt in range(retries):
+        try:
+            client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
+            client.ping()
+            logger.info("Connected to Redis")
+            return client
+        except redis.ConnectionError:
+            logger.warning("Redis not ready, retrying... (attempt %d/%d)", attempt + 1, retries)
+            await asyncio.sleep(delay)
+    raise ConnectionError("Failed to connect to Redis")
 
 
 def publish_whisper(
@@ -35,7 +69,12 @@ def publish_whisper(
         "payload": json.dumps(payload),
         "timestamp": str(time.time()),
     }
-    message_id: str = client.xadd(WHISPER_STREAM_KEY, entry, maxlen=10000, approximate=True)
+    message_id: str = client.xadd(
+        WHISPER_STREAM_KEY, entry, maxlen=WHISPER_STREAM_MAXLEN, approximate=True
+    )
+    session_key = f"aura:whispers:{session_id}"
+    client.rpush(session_key, json.dumps(entry))
+    client.expire(session_key, WHISPER_SESSION_TTL_S)
     return message_id
 
 

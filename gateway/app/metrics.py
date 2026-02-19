@@ -31,7 +31,6 @@ TOKEN_USAGE = Counter(
 SENTIMENT_SCORE = Gauge(
     "aura_sentiment_score",
     "Current caller sentiment score",
-    ["session_id"],
 )
 
 KAFKA_EVENTS = Counter(

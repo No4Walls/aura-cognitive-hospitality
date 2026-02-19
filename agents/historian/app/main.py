@@ -3,10 +3,11 @@ from __future__ import annotations
 import json
 import logging
 import os
+import signal
 import time
 
 import redis
-from confluent_kafka import Consumer, KafkaError
+from confluent_kafka import KafkaError
 from prometheus_client import start_http_server, Counter, Histogram
 
 from historian.app.vector_memory import (
@@ -14,18 +15,21 @@ from historian.app.vector_memory import (
     recall_deep_context,
     store_transcript_embedding,
 )
+from shared.kafka_utils import (
+    connect_kafka_consumer,
+    get_producer,
+    publish_reasoning,
+)
+from shared.redis_utils import (
+    connect_redis,
+    publish_whisper,
+    GUEST_KEY_PREFIX,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [historian] %(levelname)s: %(message)s")
 logger = logging.getLogger("historian")
 
-REDIS_HOST = os.getenv("REDIS_HOST", "redis")
-REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
-KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092")
 TENANT_ID = os.getenv("TENANT_ID", "default")
-TRANSCRIPT_TOPIC = "swarm.transcripts"
-REASONING_TOPIC = "swarm.reasoning"
-WHISPER_STREAM_KEY = "aura:whisper_bus"
-GUEST_KEY_PREFIX = "aura:guest:"
 
 WHISPERS_PUBLISHED = Counter(
     "historian_whispers_published_total",
@@ -48,39 +52,6 @@ EMBEDDINGS_STORED = Counter(
     "historian_embeddings_stored_total",
     "Transcript embeddings stored to vector index",
 )
-
-
-def connect_redis() -> redis.Redis:
-    for attempt in range(30):
-        try:
-            client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
-            client.ping()
-            logger.info("Connected to Redis")
-            return client
-        except redis.ConnectionError:
-            logger.warning("Redis not ready, retrying... (attempt %d/30)", attempt + 1)
-            time.sleep(2)
-    raise ConnectionError("Failed to connect to Redis")
-
-
-def connect_kafka() -> Consumer:
-    for attempt in range(30):
-        try:
-            consumer = Consumer(
-                {
-                    "bootstrap.servers": KAFKA_BOOTSTRAP,
-                    "group.id": "historian-agent",
-                    "auto.offset.reset": "latest",
-                    "enable.auto.commit": True,
-                }
-            )
-            consumer.subscribe([TRANSCRIPT_TOPIC])
-            logger.info("Subscribed to Kafka topic: %s", TRANSCRIPT_TOPIC)
-            return consumer
-        except Exception:
-            logger.warning("Kafka not ready, retrying... (attempt %d/30)", attempt + 1)
-            time.sleep(2)
-    raise ConnectionError("Failed to connect to Kafka")
 
 
 def lookup_guest(r: redis.Redis, phone: str) -> dict | None:
@@ -145,53 +116,25 @@ def extract_context(text: str, profile: dict | None) -> dict | None:
     return None
 
 
-def publish_whisper(
-    r: redis.Redis,
-    session_id: str,
-    payload: dict,
-) -> None:
-    entry = {
-        "agent": "historian",
-        "whisper_type": "guest_context",
-        "session_id": session_id,
-        "payload": json.dumps(payload),
-        "timestamp": str(time.time()),
-    }
-    r.xadd(WHISPER_STREAM_KEY, entry, maxlen=10000, approximate=True)
-    session_key = f"aura:whispers:{session_id}"
-    r.rpush(session_key, json.dumps(entry))
-    r.expire(session_key, 300)
-    WHISPERS_PUBLISHED.inc()
-    logger.info("Whisper published for session %s", session_id)
+_shutdown = False
 
 
-def publish_reasoning(producer_ref: list, session_id: str, reasoning: dict) -> None:
-    from confluent_kafka import Producer
-
-    if not producer_ref:
-        producer_ref.append(Producer({"bootstrap.servers": KAFKA_BOOTSTRAP}))
-    p = producer_ref[0]
-    event = {
-        "agent": "historian",
-        "session_id": session_id,
-        "reasoning": reasoning,
-        "timestamp": time.time(),
-    }
-    p.produce(
-        REASONING_TOPIC,
-        key=session_id.encode("utf-8"),
-        value=json.dumps(event).encode("utf-8"),
-    )
-    p.flush()
+def _handle_sigterm(_signo: int, _frame: object) -> None:
+    global _shutdown
+    _shutdown = True
+    logger.info("SIGTERM received, shutting down gracefully...")
 
 
 def run() -> None:
     start_http_server(8001)
     logger.info("Prometheus metrics server started on :8001")
 
+    signal.signal(signal.SIGTERM, _handle_sigterm)
+    signal.signal(signal.SIGINT, _handle_sigterm)
+
     r = connect_redis()
-    consumer = connect_kafka()
-    producer_ref: list = []
+    consumer = connect_kafka_consumer("historian-agent")
+    producer = get_producer()
 
     try:
         ensure_vector_index(r)
@@ -201,7 +144,7 @@ def run() -> None:
 
     logger.info("Historian agent running (tenant=%s). Listening for transcripts...", TENANT_ID)
 
-    while True:
+    while not _shutdown:
         msg = consumer.poll(timeout=1.0)
         if msg is None:
             continue
@@ -258,7 +201,8 @@ def run() -> None:
                     context["deep_memories"] = memory_summaries
                     context["memory_count"] = len(deep_memories)
 
-                publish_whisper(r, session_id, context)
+                publish_whisper(r, "historian", "guest_context", session_id, context)
+                WHISPERS_PUBLISHED.inc()
 
                 reasoning = {
                     "input_text": text[:200],
@@ -267,7 +211,7 @@ def run() -> None:
                     "deep_memories_found": len(deep_memories),
                     "processing_time_ms": round((time.time() - process_start) * 1000, 2),
                 }
-                publish_reasoning(producer_ref, session_id, reasoning)
+                publish_reasoning(producer, "historian", session_id, reasoning)
 
                 logger.info(
                     "Processed in %.1fms (memories=%d)",
@@ -277,6 +221,9 @@ def run() -> None:
 
         except Exception as exc:
             logger.error("Error processing message: %s", exc)
+
+    consumer.close()
+    logger.info("Historian agent shut down cleanly")
 
 
 if __name__ == "__main__":

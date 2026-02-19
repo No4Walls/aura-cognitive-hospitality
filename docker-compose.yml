@@ -57,8 +57,8 @@ services:
   # --- Aura Gateway ---
   aura-gateway:
     build:
-      context: ./gateway
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: gateway/Dockerfile
     container_name: aura-gateway
     ports:
       - "8000:8000"
@@ -84,8 +84,8 @@ services:
   # --- Historian Agent ---
   historian:
     build:
-      context: ./agents/historian
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: agents/historian/Dockerfile
     container_name: aura-historian
     environment:
       REDIS_HOST: redis
@@ -104,8 +104,8 @@ services:
   # --- Negotiator Agent ---
   negotiator:
     build:
-      context: ./agents/negotiator
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: agents/negotiator/Dockerfile
     container_name: aura-negotiator
     environment:
       REDIS_HOST: redis
@@ -124,8 +124,8 @@ services:
   # --- Sommelier Agent ---
   sommelier:
     build:
-      context: ./agents/sommelier
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: agents/sommelier/Dockerfile
     container_name: aura-sommelier
     ports:
       - "8003:8003"

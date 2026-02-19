@@ -4,24 +4,25 @@ import json
 import logging
 import os
 import re
+import signal
 import time
 
-import redis
-from confluent_kafka import Consumer, Producer, KafkaError
+from confluent_kafka import KafkaError
 from prometheus_client import start_http_server, Counter, Histogram
+
+from shared.kafka_utils import (
+    connect_kafka_consumer,
+    get_producer,
+    publish_reasoning,
+)
+from shared.redis_utils import connect_redis, publish_whisper
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s [negotiator] %(levelname)s: %(message)s"
 )
 logger = logging.getLogger("negotiator")
 
-REDIS_HOST = os.getenv("REDIS_HOST", "redis")
-REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
-KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092")
 TENANT_ID = os.getenv("TENANT_ID", "default")
-TRANSCRIPT_TOPIC = "swarm.transcripts"
-REASONING_TOPIC = "swarm.reasoning"
-WHISPER_STREAM_KEY = "aura:whisper_bus"
 INVENTORY_KEY = "aura:inventory"
 
 AVAILABLE_SLOTS = {
@@ -59,39 +60,6 @@ TRANSCRIPTS_PROCESSED = Counter(
     "negotiator_transcripts_processed_total",
     "Total transcripts analyzed by Negotiator",
 )
-
-
-def connect_redis() -> redis.Redis:
-    for attempt in range(30):
-        try:
-            client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
-            client.ping()
-            logger.info("Connected to Redis")
-            return client
-        except redis.ConnectionError:
-            logger.warning("Redis not ready, retrying... (attempt %d/30)", attempt + 1)
-            time.sleep(2)
-    raise ConnectionError("Failed to connect to Redis")
-
-
-def connect_kafka() -> Consumer:
-    for attempt in range(30):
-        try:
-            consumer = Consumer(
-                {
-                    "bootstrap.servers": KAFKA_BOOTSTRAP,
-                    "group.id": "negotiator-agent",
-                    "auto.offset.reset": "latest",
-                    "enable.auto.commit": True,
-                }
-            )
-            consumer.subscribe([TRANSCRIPT_TOPIC])
-            logger.info("Subscribed to Kafka topic: %s", TRANSCRIPT_TOPIC)
-            return consumer
-        except Exception:
-            logger.warning("Kafka not ready, retrying... (attempt %d/30)", attempt + 1)
-            time.sleep(2)
-    raise ConnectionError("Failed to connect to Kafka")
 
 
 _TIME_PATTERN = re.compile(r"(\d{1,2})(?::(\d{2}))?\s*(?:(am|pm))", re.IGNORECASE)
@@ -297,48 +265,29 @@ def build_strategy(intent: dict) -> dict | None:
     return None
 
 
-def publish_whisper(r: redis.Redis, session_id: str, strategy: dict) -> None:
-    entry = {
-        "agent": "negotiator",
-        "whisper_type": "strategy_hint",
-        "session_id": session_id,
-        "payload": json.dumps(strategy),
-        "timestamp": str(time.time()),
-    }
-    r.xadd(WHISPER_STREAM_KEY, entry, maxlen=10000, approximate=True)
-    session_key = f"aura:whispers:{session_id}"
-    r.rpush(session_key, json.dumps(entry))
-    r.expire(session_key, 300)
-    STRATEGIES_PUBLISHED.inc()
-    logger.info("Strategy whisper published for session %s: %s", session_id, strategy["action"])
+_shutdown = False
 
 
-def publish_reasoning(producer: Producer, session_id: str, reasoning: dict) -> None:
-    event = {
-        "agent": "negotiator",
-        "session_id": session_id,
-        "reasoning": reasoning,
-        "timestamp": time.time(),
-    }
-    producer.produce(
-        REASONING_TOPIC,
-        key=session_id.encode("utf-8"),
-        value=json.dumps(event).encode("utf-8"),
-    )
-    producer.flush()
+def _handle_sigterm(_signo: int, _frame: object) -> None:
+    global _shutdown
+    _shutdown = True
+    logger.info("SIGTERM received, shutting down gracefully...")
 
 
 def run() -> None:
     start_http_server(8002)
     logger.info("Prometheus metrics server started on :8002")
 
+    signal.signal(signal.SIGTERM, _handle_sigterm)
+    signal.signal(signal.SIGINT, _handle_sigterm)
+
     r = connect_redis()
-    consumer = connect_kafka()
-    producer = Producer({"bootstrap.servers": KAFKA_BOOTSTRAP})
+    consumer = connect_kafka_consumer("negotiator-agent")
+    producer = get_producer()
 
     logger.info("Negotiator agent running. Listening for transcripts...")
 
-    while True:
+    while not _shutdown:
         msg = consumer.poll(timeout=1.0)
         if msg is None:
             continue
@@ -369,7 +318,8 @@ def run() -> None:
             if not strategy:
                 continue
 
-            publish_whisper(r, session_id, strategy)
+            publish_whisper(r, "negotiator", "strategy_hint", session_id, strategy)
+            STRATEGIES_PUBLISHED.inc()
 
             elapsed_ms = (time.time() - process_start) * 1000
             ANALYSIS_LATENCY.observe(elapsed_ms / 1000)
@@ -380,12 +330,15 @@ def run() -> None:
                 "strategy": strategy,
                 "processing_time_ms": round(elapsed_ms, 2),
             }
-            publish_reasoning(producer, session_id, reasoning)
+            publish_reasoning(producer, "negotiator", session_id, reasoning)
 
             logger.info("Analyzed in %.1fms -> %s", elapsed_ms, strategy["action"])
 
         except Exception as exc:
             logger.error("Error processing message: %s", exc)
+
+    consumer.close()
+    logger.info("Negotiator agent shut down cleanly")
 
 
 if __name__ == "__main__":

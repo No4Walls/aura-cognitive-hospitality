@@ -3,12 +3,22 @@ from __future__ import annotations
 import json
 import logging
 import os
+import signal
 import time
 
-import redis
-from confluent_kafka import Consumer, Producer, KafkaError
+from confluent_kafka import KafkaError
 from prometheus_client import start_http_server, Counter, Histogram
 
+from shared.kafka_utils import (
+    connect_kafka_consumer,
+    get_producer,
+    publish_reasoning,
+)
+from shared.redis_utils import (
+    connect_redis,
+    publish_whisper,
+    MENU_KEY_PREFIX,
+)
 from sommelier.app.ontology import (
     expand_allergen_to_family,
     get_allergen_family,
@@ -21,15 +31,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("sommelier")
 
-REDIS_HOST = os.getenv("REDIS_HOST", "redis")
-REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
-KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092")
 TENANT_ID = os.getenv("TENANT_ID", "default")
-
-TRANSCRIPT_TOPIC = "swarm.transcripts"
-REASONING_TOPIC = "swarm.reasoning"
-WHISPER_STREAM_KEY = "aura:whisper_bus"
-MENU_KEY_PREFIX = "aura:menu:"
 
 FILTERS_PUBLISHED = Counter(
     "sommelier_filters_published_total",
@@ -50,45 +52,12 @@ TRANSCRIPTS_PROCESSED = Counter(
 )
 
 
-def connect_redis() -> redis.Redis:
-    for attempt in range(30):
-        try:
-            client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
-            client.ping()
-            logger.info("Connected to Redis")
-            return client
-        except redis.ConnectionError:
-            logger.warning("Redis not ready, retrying... (attempt %d/30)", attempt + 1)
-            time.sleep(2)
-    raise ConnectionError("Failed to connect to Redis")
-
-
-def connect_kafka() -> Consumer:
-    for attempt in range(30):
-        try:
-            consumer = Consumer(
-                {
-                    "bootstrap.servers": KAFKA_BOOTSTRAP,
-                    "group.id": "sommelier-agent",
-                    "auto.offset.reset": "latest",
-                    "enable.auto.commit": True,
-                }
-            )
-            consumer.subscribe([TRANSCRIPT_TOPIC])
-            logger.info("Subscribed to Kafka topic: %s", TRANSCRIPT_TOPIC)
-            return consumer
-        except Exception:
-            logger.warning("Kafka not ready, retrying... (attempt %d/30)", attempt + 1)
-            time.sleep(2)
-    raise ConnectionError("Failed to connect to Kafka")
-
-
 _menu_cache: list[dict] = []
 _menu_cache_ts: float = 0.0
 MENU_CACHE_TTL_S = 60
 
 
-def load_menu(r: redis.Redis) -> list[dict]:
+def load_menu(r) -> list[dict]:
     global _menu_cache, _menu_cache_ts
     now = time.time()
     if _menu_cache and (now - _menu_cache_ts) < MENU_CACHE_TTL_S:
@@ -226,47 +195,29 @@ def find_pairing(menu: list[dict], dish_hint: str | None) -> dict | None:
     }
 
 
-def publish_whisper(r: redis.Redis, session_id: str, whisper_type: str, payload: dict) -> None:
-    entry = {
-        "agent": "sommelier",
-        "whisper_type": whisper_type,
-        "session_id": session_id,
-        "payload": json.dumps(payload),
-        "timestamp": str(time.time()),
-    }
-    r.xadd(WHISPER_STREAM_KEY, entry, maxlen=10000, approximate=True)
-    session_key = f"aura:whispers:{session_id}"
-    r.rpush(session_key, json.dumps(entry))
-    r.expire(session_key, 300)
-    logger.info("Whisper published [%s] for session %s", whisper_type, session_id)
+_shutdown = False
 
 
-def publish_reasoning(producer: Producer, session_id: str, reasoning: dict) -> None:
-    event = {
-        "agent": "sommelier",
-        "session_id": session_id,
-        "reasoning": reasoning,
-        "timestamp": time.time(),
-    }
-    producer.produce(
-        REASONING_TOPIC,
-        key=session_id.encode("utf-8"),
-        value=json.dumps(event).encode("utf-8"),
-    )
-    producer.flush()
+def _handle_sigterm(_signo: int, _frame: object) -> None:
+    global _shutdown
+    _shutdown = True
+    logger.info("SIGTERM received, shutting down gracefully...")
 
 
 def run() -> None:
     start_http_server(8003)
     logger.info("Prometheus metrics server started on :8003")
 
+    signal.signal(signal.SIGTERM, _handle_sigterm)
+    signal.signal(signal.SIGINT, _handle_sigterm)
+
     r = connect_redis()
-    consumer = connect_kafka()
-    producer = Producer({"bootstrap.servers": KAFKA_BOOTSTRAP})
+    consumer = connect_kafka_consumer("sommelier-agent")
+    producer = get_producer()
 
     logger.info("Sommelier agent running. Listening for transcripts...")
 
-    while True:
+    while not _shutdown:
         msg = consumer.poll(timeout=1.0)
         if msg is None:
             continue
@@ -311,7 +262,7 @@ def run() -> None:
                     "removed_count": len(removed),
                     "reasoning": notes,
                 }
-                publish_whisper(r, session_id, "menu_suggestion", payload)
+                publish_whisper(r, "sommelier", "menu_suggestion", session_id, payload)
 
                 reasoning = {
                     "input_text": text[:200],
@@ -319,7 +270,7 @@ def run() -> None:
                     "filter_result": payload,
                     "processing_time_ms": round(elapsed_ms, 2),
                 }
-                publish_reasoning(producer, session_id, reasoning)
+                publish_reasoning(producer, "sommelier", session_id, reasoning)
                 logger.info(
                     "Filtered menu in %.1fms: %d safe, %d removed",
                     elapsed_ms, len(safe), len(removed),
@@ -347,14 +298,14 @@ def run() -> None:
                         "note": "Could not match dish to menu. Suggest asking guest for more detail.",
                     }
 
-                publish_whisper(r, session_id, "menu_suggestion", payload)
+                publish_whisper(r, "sommelier", "menu_suggestion", session_id, payload)
                 reasoning = {
                     "input_text": text[:200],
                     "intent": intent,
                     "pairing_result": payload,
                     "processing_time_ms": round(elapsed_ms, 2),
                 }
-                publish_reasoning(producer, session_id, reasoning)
+                publish_reasoning(producer, "sommelier", session_id, reasoning)
                 logger.info("Wine pairing in %.1fms for '%s'", elapsed_ms, dish_hint)
 
             elif intent_type == "menu_inquiry":
@@ -372,6 +323,9 @@ def run() -> None:
 
         except Exception as exc:
             logger.error("Error processing message: %s", exc)
+
+    consumer.close()
+    logger.info("Sommelier agent shut down cleanly")
 
 
 if __name__ == "__main__":

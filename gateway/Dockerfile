@@ -6,10 +6,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc librdkafka-dev && \
     rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt .
+COPY gateway/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY app/ gateway/app/
+COPY shared/ shared/
+COPY gateway/app/ gateway/app/
 
 EXPOSE 8000
 

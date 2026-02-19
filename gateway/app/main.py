@@ -13,9 +13,6 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
 from fastapi.responses import JSONResponse
 from prometheus_client import make_asgi_app
 
-from gateway.app.config import (
-    KAFKA_BOOTSTRAP_SERVERS,
-)
 from gateway.app.metrics import (
     ACTIVE_CALLS,
     CALL_COUNT,
@@ -26,20 +23,22 @@ from gateway.app.metrics import (
     WHISPER_COUNT,
 )
 
+from shared.kafka_utils import (
+    TRANSCRIPT_TOPIC,
+    async_connect_kafka_producer,
+)
+from shared.redis_utils import (
+    GUEST_KEY_PREFIX,
+    async_connect_redis,
+)
+
 import redis
 from confluent_kafka import Producer
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
 logger = logging.getLogger("aura-gateway")
 
-REDIS_HOST = "redis"
-REDIS_PORT = 6379
 TENANT_ID = os.getenv("TENANT_ID", "default")
-WHISPER_STREAM_KEY = "aura:whisper_bus"
-GUEST_KEY_PREFIX = "aura:guest:"
-MENU_KEY_PREFIX = "aura:menu:"
-TRANSCRIPT_TOPIC = "swarm.transcripts"
-REASONING_TOPIC = "swarm.reasoning"
 
 
 redis_client: redis.Redis | None = None
@@ -51,29 +50,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     global redis_client, kafka_producer
     logger.info("Aura Gateway starting up...")
 
-    for attempt in range(30):
-        try:
-            redis_client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
-            redis_client.ping()
-            logger.info("Connected to Redis")
-            break
-        except redis.ConnectionError:
-            logger.warning("Redis not ready, retrying in 2s... (attempt %d/30)", attempt + 1)
-            await asyncio.sleep(2)
-    else:
-        logger.error("Failed to connect to Redis after 30 attempts")
+    try:
+        redis_client = await async_connect_redis()
+    except Exception:
+        logger.error("Failed to connect to Redis after retries")
 
-    for attempt in range(30):
-        try:
-            kafka_producer = Producer({"bootstrap.servers": KAFKA_BOOTSTRAP_SERVERS})
-            kafka_producer.flush(timeout=5)
-            logger.info("Connected to Kafka")
-            break
-        except Exception:
-            logger.warning("Kafka not ready, retrying in 2s... (attempt %d/30)", attempt + 1)
-            await asyncio.sleep(2)
-    else:
-        logger.error("Failed to connect to Kafka after 30 attempts")
+    try:
+        kafka_producer = await async_connect_kafka_producer()
+    except Exception:
+        logger.error("Failed to connect to Kafka after retries")
 
     logger.info("Aura Gateway ready")
     yield
@@ -226,9 +211,9 @@ def _build_greeting(profile: dict | None, session_id: str) -> str:
         greeting = f"Welcome back, {name}! Wonderful to hear from you."
         if "red wine" in tags:
             greeting += " Shall I start with your usual glass of red?"
-        SENTIMENT_SCORE.labels(session_id=session_id).set(0.8)
+        SENTIMENT_SCORE.set(0.8)
         return greeting
-    SENTIMENT_SCORE.labels(session_id=session_id).set(0.5)
+    SENTIMENT_SCORE.set(0.5)
     return "Good evening, thank you for calling. How may I assist you?"
 
 
