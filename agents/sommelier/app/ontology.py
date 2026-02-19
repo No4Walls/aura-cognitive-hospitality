@@ -74,10 +74,13 @@ def get_allergen_family(ingredient: str) -> str | None:
 
 
 def expand_allergen_to_family(allergen: str) -> list[str]:
-    family = get_allergen_family(allergen)
+    allergen_lower = allergen.lower().strip()
+    if allergen_lower in ALLERGEN_FAMILIES:
+        return ALLERGEN_FAMILIES[allergen_lower]
+    family = get_allergen_family(allergen_lower)
     if family:
         return ALLERGEN_FAMILIES[family]
-    return [allergen.lower().strip()]
+    return [allergen_lower]
 
 
 def get_flavor_category(tags: list[str]) -> str | None:

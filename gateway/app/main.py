@@ -304,7 +304,29 @@ def _generate_response(
             strategy_hint = payload.get("suggestion", "")
             context_parts.append(f"[Strategy: {strategy_hint}]")
         elif wtype == "menu_suggestion":
-            sommelier_hint = payload.get("recommendation", "")
+            if payload.get("filter_type") == "ingredient_exclusion":
+                safe = payload.get("safe_items", [])
+                removed = payload.get("removed_items", [])
+                reasoning = payload.get("reasoning", [])
+                if safe:
+                    sommelier_hint = f"Based on your preferences, I'd recommend: {', '.join(safe)}."
+                    if removed:
+                        sommelier_hint += f" I've set aside {', '.join(removed)} as they contain ingredients you'd like to avoid."
+                elif reasoning:
+                    sommelier_hint = " ".join(reasoning)
+            elif payload.get("pairing_type") == "wine":
+                recs = payload.get("recommendations", [])
+                dish = payload.get("dish", "")
+                if recs:
+                    top = recs[0]
+                    sommelier_hint = f"For the {dish}, I'd suggest a {top.get('wine', '')}. {top.get('reason', '')}"
+                    if len(recs) > 1:
+                        others = ", ".join(r.get("wine", "") for r in recs[1:])
+                        sommelier_hint += f" You might also enjoy {others}."
+            elif payload.get("inquiry_type") == "general_menu":
+                highlights = payload.get("highlights", [])
+                if highlights:
+                    sommelier_hint = f"Tonight's highlights include {', '.join(highlights)}."
             context_parts.append(f"[Sommelier: {sommelier_hint}]")
 
     if profile:
