@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import time
@@ -10,46 +9,48 @@ import redis
 from redis.commands.search.field import TagField, TextField, VectorField
 from redis.commands.search.indexDefinition import IndexDefinition, IndexType
 from redis.commands.search.query import Query
+from sentence_transformers import SentenceTransformer
 
 logger = logging.getLogger("historian.vector_memory")
 
-VECTOR_DIM = 128
+VECTOR_DIM = 384
+_model: SentenceTransformer | None = None
 MEMORY_KEY_PREFIX = "aura:memory:"
 MEMORY_INDEX_NAME = "idx:aura_memory"
 DISTANCE_METRIC = "COSINE"
 
 
+def _get_model() -> SentenceTransformer:
+    global _model
+    if _model is None:
+        logger.info("Loading sentence-transformers model (all-MiniLM-L6-v2)...")
+        _model = SentenceTransformer("all-MiniLM-L6-v2")
+        logger.info("Model loaded (dim=%d)", _model.get_sentence_embedding_dimension())
+    return _model
+
+
 def _text_to_embedding(text: str) -> list[float]:
-    text_lower = text.lower().strip()
-    h = hashlib.sha256(text_lower.encode()).digest()
-    raw = np.frombuffer(h * (VECTOR_DIM // 32 + 1), dtype=np.uint8)[:VECTOR_DIM]
-    embedding = (raw.astype(np.float32) / 255.0) * 2 - 1
-
-    keyword_boosts: dict[str, int] = {
-        "anniversary": 0, "birthday": 1, "celebration": 2,
-        "wine": 3, "red": 4, "white": 5,
-        "table": 6, "reservation": 7, "book": 8,
-        "allergy": 9, "vegetarian": 10, "vegan": 11,
-        "complaint": 12, "happy": 13, "love": 14,
-        "special": 15, "usual": 16, "regular": 17,
-    }
-
-    for keyword, idx in keyword_boosts.items():
-        if keyword in text_lower:
-            target = idx % VECTOR_DIM
-            embedding[target] = min(embedding[target] + 0.5, 1.0)
-
-    norm = np.linalg.norm(embedding)
-    if norm > 0:
-        embedding = embedding / norm
-
+    model = _get_model()
+    embedding = model.encode(text, normalize_embeddings=True)
     return embedding.tolist()
 
 
 def ensure_vector_index(r: redis.Redis) -> None:
     try:
-        r.ft(MEMORY_INDEX_NAME).info()
-        logger.info("Vector index '%s' already exists", MEMORY_INDEX_NAME)
+        info = r.ft(MEMORY_INDEX_NAME).info()
+        attrs = info.get("attributes", [])
+        for attr in attrs:
+            if isinstance(attr, list) and b"DIM" in attr:
+                dim_idx = attr.index(b"DIM") + 1
+                existing_dim = int(attr[dim_idx])
+                if existing_dim != VECTOR_DIM:
+                    logger.warning(
+                        "Index dimension mismatch (%d != %d), dropping and recreating",
+                        existing_dim, VECTOR_DIM,
+                    )
+                    r.ft(MEMORY_INDEX_NAME).dropindex(delete_documents=True)
+                    raise Exception("re-create needed")
+        logger.info("Vector index '%s' already exists (dim=%d)", MEMORY_INDEX_NAME, VECTOR_DIM)
         return
     except Exception:
         pass

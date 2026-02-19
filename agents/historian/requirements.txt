@@ -2,3 +2,4 @@ redis[hiredis]==5.2.1
 confluent-kafka==2.6.1
 prometheus-client==0.21.1
 numpy==2.2.2
+sentence-transformers==3.4.1
