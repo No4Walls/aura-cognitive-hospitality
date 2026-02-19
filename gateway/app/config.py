@@ -10,8 +10,9 @@ TWILIO_PHONE_NUMBER = os.getenv("TWILIO_PHONE_NUMBER", "")
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
 ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "")
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
+GEMINI_GENERATIVE_MODEL = os.getenv("GEMINI_GENERATIVE_MODEL", "gemini-3-flash")
+GEMINI_EMBEDDING_MODEL = os.getenv("GEMINI_EMBEDDING_MODEL", "text-embedding-004")
 
 REDIS_HOST = os.getenv("REDIS_HOST", "redis")
 REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))

@@ -361,8 +361,9 @@ cp .env.example .env
 | `TWILIO_PHONE_NUMBER` | For live calls | Your Twilio phone number |
 | `ELEVENLABS_API_KEY` | For live calls | ElevenLabs API key |
 | `ELEVENLABS_VOICE_ID` | For live calls | ElevenLabs voice ID for Aura's persona |
-| `GEMINI_API_KEY` | For LLM reasoning | Gemini API key |
-| `GEMINI_MODEL` | Optional | Gemini model name (default: `gemini-1.5-flash`) |
+| `GOOGLE_API_KEY` | For Gemini LLM + embeddings | Google AI API key |
+| `GEMINI_GENERATIVE_MODEL` | Optional | Generative model (default: `gemini-3-flash`) |
+| `GEMINI_EMBEDDING_MODEL` | Optional | Embedding model (default: `text-embedding-004`) |
 | `GRAFANA_ADMIN_PASSWORD` | Optional | Grafana admin password (default: `aura_admin`) |
 
 The simulate-call API and Julian Test work without any external API keys.

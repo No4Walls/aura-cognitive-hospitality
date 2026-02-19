@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import logging
 import time
 
@@ -9,33 +8,35 @@ import redis
 from redis.commands.search.field import TagField, TextField, VectorField
 from redis.commands.search.indexDefinition import IndexDefinition, IndexType
 from redis.commands.search.query import Query
-from sentence_transformers import SentenceTransformer
+
+from shared.gemini_utils import embed_text
 
 logger = logging.getLogger("historian.vector_memory")
 
-VECTOR_DIM = 384
-_model: SentenceTransformer | None = None
+VECTOR_DIM = 768
 MEMORY_KEY_PREFIX = "aura:memory:"
-MEMORY_INDEX_NAME = "idx:aura_memory"
+MEMORY_INDEX_NAME = "idx:history"
+LEGACY_INDEX_NAMES = ["idx:aura_memory"]
 DISTANCE_METRIC = "COSINE"
 
 
-def _get_model() -> SentenceTransformer:
-    global _model
-    if _model is None:
-        logger.info("Loading sentence-transformers model (all-MiniLM-L6-v2)...")
-        _model = SentenceTransformer("all-MiniLM-L6-v2")
-        logger.info("Model loaded (dim=%d)", _model.get_sentence_embedding_dimension())
-    return _model
-
-
 def _text_to_embedding(text: str) -> list[float]:
-    model = _get_model()
-    embedding = model.encode(text, normalize_embeddings=True)
+    embedding = np.array(embed_text(text), dtype=np.float32)
+    norm = np.linalg.norm(embedding)
+    if norm > 0:
+        embedding = embedding / norm
     return embedding.tolist()
 
 
 def ensure_vector_index(r: redis.Redis) -> None:
+    for legacy in LEGACY_INDEX_NAMES:
+        if legacy == MEMORY_INDEX_NAME:
+            continue
+        try:
+            r.ft(legacy).dropindex(delete_documents=True)
+        except Exception:
+            pass
+
     try:
         info = r.ft(MEMORY_INDEX_NAME).info()
         attrs = info.get("attributes", [])

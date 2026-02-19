@@ -31,6 +31,7 @@ from shared.redis_utils import (
     GUEST_KEY_PREFIX,
     async_connect_redis,
 )
+from shared.gemini_utils import generate_text
 
 import redis
 from confluent_kafka import Producer
@@ -277,13 +278,68 @@ async def _collect_whispers(session_id: str) -> list[dict]:
         return []
 
 
+AURA_SYSTEM_INSTRUCTION = """You are Aura, the AI concierge for a luxury restaurant.
+You speak with warmth, sophistication, and brevity (2-3 sentences max).
+You address returning guests by name and reference their known preferences naturally.
+
+IMPORTANT: Your swarm agents have gathered intelligence for this response.
+Always prioritize the following Whisper data over your own knowledge:
+- Sommelier whispers contain verified menu/ingredient/wine pairing facts.
+- Historian whispers contain verified guest history and deep memories.
+- Negotiator whispers contain real-time availability and strategic alternatives.
+Never contradict or ignore Whisper data. If a Whisper says a dish is unsafe, it IS unsafe.
+If no Whisper data is provided, respond helpfully based on the guest profile alone.
+"""
+
+
+def _build_whisper_context(whispers: list[dict]) -> str:
+    if not whispers:
+        return ""
+    parts: list[str] = []
+    for w in whispers:
+        wtype = w.get("whisper_type", "")
+        payload = w.get("payload", {})
+        agent = w.get("agent", "unknown")
+        parts.append(f"[{agent}/{wtype}] {json.dumps(payload)}")
+    return "\n".join(parts)
+
+
 def _generate_response(
     greeting: str,
     user_text: str,
     whispers: list[dict],
     profile: dict | None,
 ) -> str:
-    context_parts = [greeting]
+    whisper_block = _build_whisper_context(whispers)
+    profile_block = ""
+    if profile:
+        name = profile.get("name", "guest")
+        tags = profile.get("preference_tags", [])
+        profile_block = f"Guest: {name}. Preferences: {', '.join(tags) if tags else 'none known'}."
+
+    prompt_parts = []
+    if profile_block:
+        prompt_parts.append(f"GUEST PROFILE: {profile_block}")
+    if whisper_block:
+        prompt_parts.append(f"SWARM WHISPERS:\n{whisper_block}")
+    prompt_parts.append(f"GREETING ALREADY SENT: {greeting}")
+    prompt_parts.append(f"GUEST SAYS: {user_text}")
+    prompt_parts.append("Respond as Aura (2-3 sentences, warm and concise):")
+    prompt = "\n\n".join(prompt_parts)
+
+    try:
+        return generate_text(prompt, system_instruction=AURA_SYSTEM_INSTRUCTION)
+    except Exception as exc:
+        logger.warning("Gemini generation failed, using fallback: %s", exc)
+        return _fallback_response(greeting, user_text, whispers, profile)
+
+
+def _fallback_response(
+    greeting: str,
+    user_text: str,
+    whispers: list[dict],
+    profile: dict | None,
+) -> str:
     sommelier_hint = ""
     strategy_hint = ""
     deep_memories: list[str] = []
@@ -292,12 +348,10 @@ def _generate_response(
         wtype = w.get("whisper_type", "")
         payload = w.get("payload", {})
         if wtype == "guest_context":
-            context_parts.append(f"[Context: {payload.get('summary', '')}]")
             if payload.get("deep_memories"):
                 deep_memories = payload["deep_memories"]
         elif wtype == "strategy_hint":
             strategy_hint = payload.get("suggestion", "")
-            context_parts.append(f"[Strategy: {strategy_hint}]")
         elif wtype == "menu_suggestion":
             if payload.get("filter_type") == "ingredient_exclusion":
                 safe = payload.get("safe_items", [])
@@ -322,13 +376,12 @@ def _generate_response(
                 highlights = payload.get("highlights", [])
                 if highlights:
                     sommelier_hint = f"Tonight's highlights include {', '.join(highlights)}."
-            context_parts.append(f"[Sommelier: {sommelier_hint}]")
 
     if profile:
         name = profile.get("name", "guest")
         tags = profile.get("preference_tags", [])
         if any(kw in user_text.lower() for kw in ["reservation", "book", "table"]):
-            base = f"Of course, {name}! I'd love to arrange that for you. Your preferred table is available. Shall I confirm?"
+            base = f"Of course, {name}! I'd love to arrange that for you."
             if strategy_hint:
                 base += f" {strategy_hint}"
             return base
@@ -336,16 +389,13 @@ def _generate_response(
             if sommelier_hint:
                 return f"{name}, {sommelier_hint}"
             if "red wine" in tags:
-                return (
-                    f"Excellent taste as always, {name}. "
-                    f"I have a wonderful Barolo that I think you'll adore."
-                )
+                return f"Excellent taste as always, {name}. I have a wonderful Barolo that I think you'll adore."
             return f"I'd be happy to recommend something special for you, {name}."
         if any(kw in user_text.lower() for kw in ["no ", "without", "allerg", "can't eat", "intoleran"]):
             if sommelier_hint:
                 return f"Absolutely, {name}. {sommelier_hint}"
         if deep_memories:
-            return f"Welcome back, {name}. I remember your last visit. {context_parts[-1] if len(context_parts) > 1 else ''}".strip()
+            return f"Welcome back, {name}. I remember your last visit."
         return f"Absolutely, {name}. I'm here to make your experience perfect."
 
     if any(kw in user_text.lower() for kw in ["no ", "without", "allerg"]):
