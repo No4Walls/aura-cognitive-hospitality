@@ -25,10 +25,11 @@ services:
     networks:
       - aura-net
     healthcheck:
-      test: ["CMD-SHELL", "echo ruok | nc localhost 2181 | grep imok"]
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/localhost/2181"]
       interval: 10s
       timeout: 5s
-      retries: 10
+      retries: 5
+      start_period: 10s
 
   kafka:
     image: confluentinc/cp-kafka:7.7.1
