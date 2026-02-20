@@ -589,12 +589,16 @@ class AudioBridge:
             async with websockets.connect(
                 el_url, ping_interval=WS_PING_INTERVAL,
             ) as el_ws:
-                # Empty init message (Fix #12: no space = ~100ms less silence)
+                # BOS message: must be " " (space), NOT "" which closes the WS
                 await el_ws.send(json.dumps({
-                    "text": "",
+                    "text": " ",
                     "voice_settings": {
                         "stability": 0.5,
-                        "similarity_boost": 0.75,
+                        "similarity_boost": 0.8,
+                        "use_speaker_boost": False,
+                    },
+                    "generation_config": {
+                        "chunk_length_schedule": [120, 160, 250, 290],
                     },
                     "xi_api_key": ELEVENLABS_API_KEY,
                 }))
@@ -643,12 +647,16 @@ class AudioBridge:
             async with websockets.connect(
                 el_url, ping_interval=WS_PING_INTERVAL,
             ) as el_ws:
-                # Empty init message (Fix #12: no space = ~100ms less silence)
+                # BOS message: must be " " (space), NOT "" which closes the WS
                 await el_ws.send(json.dumps({
-                    "text": "",
+                    "text": " ",
                     "voice_settings": {
                         "stability": 0.5,
-                        "similarity_boost": 0.75,
+                        "similarity_boost": 0.8,
+                        "use_speaker_boost": False,
+                    },
+                    "generation_config": {
+                        "chunk_length_schedule": [120, 160, 250, 290],
                     },
                     "xi_api_key": ELEVENLABS_API_KEY,
                 }))
