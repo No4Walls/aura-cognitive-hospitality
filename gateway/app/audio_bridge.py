@@ -19,6 +19,7 @@ from typing import AsyncGenerator, Callable
 import websockets
 
 from gateway.app.config import (
+    BARGE_IN_THRESHOLD,
     DEEPGRAM_API_KEY,
     ELEVENLABS_API_KEY,
     ELEVENLABS_VOICE_ID,
@@ -69,37 +70,47 @@ def _build_elevenlabs_url() -> str:
 # ---------------------------------------------------------------------------
 # Menu keyword extraction (Task B: Nova-3 Keyterm Prompting)
 # ---------------------------------------------------------------------------
+def _fetch_menu_keywords_sync(redis_client) -> list[str]:
+    """Synchronous Redis scan for menu keywords (runs in thread)."""
+    keywords: list[str] = []
+    cursor = 0
+    while True:
+        cursor, keys = redis_client.scan(
+            cursor, match=f"{MENU_KEY_PREFIX}*", count=100,
+        )
+        for key in keys:
+            item = redis_client.json().get(key, "$")
+            if item and len(item) > 0:
+                name = item[0].get("name", "")
+                if name:
+                    keywords.append(name)
+                for ing in item[0].get("ingredients", []):
+                    if len(ing) > 3:
+                        keywords.append(ing)
+        if cursor == 0:
+            break
+    seen: set[str] = set()
+    unique: list[str] = []
+    for kw in keywords:
+        low = kw.lower()
+        if low not in seen:
+            seen.add(low)
+            unique.append(kw)
+    return unique[:100]
+
+
 async def fetch_menu_keywords(redis_client) -> list[str]:
-    """Query Redis for current menu item names to inject as Deepgram keywords."""
+    """Query Redis for current menu item names to inject as Deepgram keywords.
+
+    Runs the blocking Redis scan in a thread to avoid stalling the event loop
+    (prevents audio jitter in the Twilio stream).
+    """
     if not redis_client:
         return []
     try:
-        keywords: list[str] = []
-        cursor = 0
-        while True:
-            cursor, keys = redis_client.scan(
-                cursor, match=f"{MENU_KEY_PREFIX}*", count=100,
-            )
-            for key in keys:
-                item = redis_client.json().get(key, "$")
-                if item and len(item) > 0:
-                    name = item[0].get("name", "")
-                    if name:
-                        keywords.append(name)
-                    for ing in item[0].get("ingredients", []):
-                        if len(ing) > 3:
-                            keywords.append(ing)
-            if cursor == 0:
-                break
-        seen: set[str] = set()
-        unique: list[str] = []
-        for kw in keywords:
-            low = kw.lower()
-            if low not in seen:
-                seen.add(low)
-                unique.append(kw)
+        unique = await asyncio.to_thread(_fetch_menu_keywords_sync, redis_client)
         logger.info("Loaded %d menu keywords for Deepgram Nova-3", len(unique))
-        return unique[:100]
+        return unique
     except Exception as exc:
         logger.warning("Failed to load menu keywords: %s", exc)
         return []
@@ -270,11 +281,18 @@ class AudioBridge:
                     transcript = alt.get("transcript", "")
                     is_final = msg.get("is_final", False)
 
-                    # Barge-in: guest speaks while AI is talking
-                    if self._speaking and transcript.strip():
+                    # Barge-in: guest speaks while AI is talking.
+                    # Require minimum character threshold to avoid false
+                    # positives from background noise ("um", dishes, etc.).
+                    stripped = transcript.strip()
+                    if (
+                        self._speaking
+                        and len(stripped) >= BARGE_IN_THRESHOLD
+                    ):
                         logger.info(
-                            "Barge-in detected in session %s, cancelling TTS",
-                            self._session_id,
+                            "Barge-in detected in session %s (%d chars), "
+                            "cancelling TTS",
+                            self._session_id, len(stripped),
                         )
                         self._cancel_tts.set()
                         await self._send_twilio_clear()

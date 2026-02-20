@@ -27,3 +27,7 @@ DOMAIN = os.getenv("DOMAIN", "localhost:8000")
 WHISPER_POLL_TIMEOUT_MS = 50
 MAX_RESPONSE_LATENCY_MS = 500
 VOCAL_DELAY_TARGET_MS = 800
+
+# Minimum characters in an interim transcript before triggering barge-in.
+# Prevents background noise ("um", "[noise]") from cancelling Aura's speech.
+BARGE_IN_THRESHOLD = int(os.getenv("BARGE_IN_THRESHOLD", "3"))
