@@ -36,6 +36,12 @@ except ImportError:
     redis = None  # type: ignore[assignment]
 
 try:
+    from pydub import AudioSegment  # type: ignore[import-untyped]
+    HAS_PYDUB = True
+except ImportError:
+    HAS_PYDUB = False
+
+try:
     import httpx
 except ImportError:
     httpx = None  # type: ignore[assignment]
@@ -62,6 +68,27 @@ def _generate_silence_chunks(duration_s: float) -> list[bytes]:
     return [silence for _ in range(n_chunks)]
 
 
+def _pcm16_to_mulaw_chunks(raw: bytes, sample_width: int = 2, n_channels: int = 1) -> list[bytes]:
+    """Convert raw PCM audio bytes to 20ms mu-law chunks."""
+    # If already mu-law (1 byte/sample), use directly
+    if sample_width == 1:
+        audio = raw
+    else:
+        audio = bytearray()
+        for i in range(0, len(raw), sample_width * n_channels):
+            sample = struct.unpack_from("<h", raw, i)[0]
+            audio.append(_linear_to_mulaw(sample))
+        audio = bytes(audio)
+
+    chunks = []
+    for i in range(0, len(audio), CHUNK_SAMPLES):
+        chunk = audio[i : i + CHUNK_SAMPLES]
+        if len(chunk) < CHUNK_SAMPLES:
+            chunk += bytes([MULAW_SILENCE_BYTE] * (CHUNK_SAMPLES - len(chunk)))
+        chunks.append(chunk)
+    return chunks
+
+
 def _load_wav_as_mulaw_chunks(wav_path: str) -> list[bytes]:
     """Load a WAV file and split into 20ms mu-law chunks.
 
@@ -80,25 +107,43 @@ def _load_wav_as_mulaw_chunks(wav_path: str) -> list[bytes]:
     if framerate != 8000:
         print(f"  WARN: WAV sample rate is {framerate}, expected 8000")
 
-    # If already mu-law (sample_width=1, comptype=ULAW), use directly
-    if sample_width == 1:
-        audio = raw
-    else:
-        # Convert 16-bit PCM to mu-law
-        audio = bytearray()
-        for i in range(0, len(raw), sample_width * n_channels):
-            sample = struct.unpack_from("<h", raw, i)[0]
-            audio.append(_linear_to_mulaw(sample))
-        audio = bytes(audio)
+    return _pcm16_to_mulaw_chunks(raw, sample_width, n_channels)
 
-    # Split into 20ms chunks
-    chunks = []
-    for i in range(0, len(audio), CHUNK_SAMPLES):
-        chunk = audio[i : i + CHUNK_SAMPLES]
-        if len(chunk) < CHUNK_SAMPLES:
-            chunk += bytes([MULAW_SILENCE_BYTE] * (CHUNK_SAMPLES - len(chunk)))
-        chunks.append(chunk)
-    return chunks
+
+def _load_mp3_as_mulaw_chunks(mp3_path: str) -> list[bytes]:
+    """Load an MP3 file, normalize to 8kHz mono 16-bit PCM, and split into
+    20ms mu-law chunks.  Requires pydub (+ ffmpeg on the system PATH).
+    """
+    if not HAS_PYDUB:
+        print("  ERROR: pydub is required for MP3 support.")
+        print("         pip install pydub   (and ensure ffmpeg is installed)")
+        sys.exit(1)
+
+    print(f"  Converting MP3 to 8kHz mono PCM via pydub...")
+    seg = AudioSegment.from_mp3(mp3_path)
+    seg = seg.set_frame_rate(MULAW_SAMPLE_RATE).set_channels(1).set_sample_width(2)
+    raw = seg.raw_data
+    duration_s = len(raw) / (MULAW_SAMPLE_RATE * 2)  # 2 bytes per sample
+    print(f"  Normalised: {duration_s:.1f}s, 8000Hz, mono, 16-bit PCM")
+    return _pcm16_to_mulaw_chunks(raw)
+
+
+def _load_audio_file(path: str) -> list[bytes]:
+    """Auto-detect format and return mu-law chunks."""
+    ext = os.path.splitext(path)[1].lower()
+    if ext == ".mp3":
+        return _load_mp3_as_mulaw_chunks(path)
+    elif ext in (".wav", ".wave"):
+        return _load_wav_as_mulaw_chunks(path)
+    else:
+        # Try pydub for any other format (ogg, flac, etc.)
+        if not HAS_PYDUB:
+            print(f"  ERROR: Unsupported format '{ext}'. Install pydub for broader codec support.")
+            sys.exit(1)
+        print(f"  Converting {ext} to 8kHz mono PCM via pydub...")
+        seg = AudioSegment.from_file(path)
+        seg = seg.set_frame_rate(MULAW_SAMPLE_RATE).set_channels(1).set_sample_width(2)
+        return _pcm16_to_mulaw_chunks(seg.raw_data)
 
 
 def _linear_to_mulaw(sample: int) -> int:
@@ -431,8 +476,9 @@ async def main() -> int:
         help="Gateway WebSocket URL (default: ws://localhost:8000)",
     )
     parser.add_argument(
-        "--wav", default=None,
-        help="Path to a mu-law 8kHz WAV file for realistic audio testing",
+        "--wav", "--audio", dest="audio", default=None,
+        help="Path to an audio file (WAV, MP3, etc.) for realistic audio testing. "
+             "MP3/other formats require pydub + ffmpeg.",
     )
     parser.add_argument(
         "--record", action="store_true", default=False,
@@ -449,9 +495,9 @@ async def main() -> int:
     print("=" * 60)
 
     # Prepare audio chunks
-    if args.wav:
-        print(f"\n  Loading WAV: {args.wav}")
-        chunks = _load_wav_as_mulaw_chunks(args.wav)
+    if args.audio:
+        print(f"\n  Loading audio: {args.audio}")
+        chunks = _load_audio_file(args.audio)
         print(f"  Loaded {len(chunks)} chunks ({len(chunks) * CHUNK_DURATION_MS}ms)")
     else:
         print("\n  No WAV provided, using 2s silence for connectivity test")
