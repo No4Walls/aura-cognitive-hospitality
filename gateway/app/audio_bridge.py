@@ -370,6 +370,7 @@ class AudioBridge:
         collect_whispers_fn: Callable,
         build_prompt_fn: Callable,
         system_instruction: str,
+        stream_sid: str | None = None,
     ):
         self._twilio_ws = twilio_ws
         self._session_id = session_id
@@ -383,7 +384,7 @@ class AudioBridge:
         self._build_prompt = build_prompt_fn
         self._system_instruction = system_instruction
 
-        self._stream_sid: str | None = None
+        self._stream_sid: str | None = stream_sid
         self._dg_ws = None
         self._turn_count = 0
         self._full_response_text = ""
@@ -479,20 +480,19 @@ class AudioBridge:
     # Loop 1: Twilio -> Deepgram
     # ------------------------------------------------------------------
     async def _loop_twilio_in(self) -> None:
-        """Receive Twilio media events and pipe mu-law audio to Deepgram."""
+        """Receive Twilio media events and pipe mu-law audio to Deepgram.
+
+        Note: the Twilio 'start' event is consumed by the WebSocket handler
+        in main.py before the bridge is created, so we only handle 'media'
+        and 'stop' here.
+        """
         try:
             while True:
                 raw = await self._twilio_ws.receive_text()
                 msg = json.loads(raw)
                 event = msg.get("event")
 
-                if event == "start":
-                    self._stream_sid = msg["start"]["streamSid"]
-                    logger.info(
-                        "Twilio stream started: streamSid=%s session=%s",
-                        self._stream_sid, self._session_id,
-                    )
-                elif event == "media":
+                if event == "media":
                     audio_bytes = base64.b64decode(msg["media"]["payload"])
                     if self._recorder:
                         self._recorder.append_inbound(audio_bytes)

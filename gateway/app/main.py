@@ -111,14 +111,13 @@ async def twilio_voice_webhook(request: Request) -> Response:
 
     _publish_transcript(session_id, caller, f"[CALL_START] from {caller}", "inbound")
 
-    # URL-encode the caller number for the query param
-    caller_encoded = quote(caller, safe="")
-
     twiml = (
         '<?xml version="1.0" encoding="UTF-8"?>'
         "<Response>"
         "<Connect>"
-        f'<Stream url="wss://{DOMAIN}/ws/media/{session_id}?caller={caller_encoded}" />'
+        f'<Stream url="wss://{DOMAIN}/ws/media/{session_id}">'
+        f'<Parameter name="caller" value="{caller}" />'
+        "</Stream>"
         "</Connect>"
         "</Response>"
     )
@@ -131,26 +130,50 @@ async def media_stream(websocket: WebSocket, session_id: str) -> None:
     await websocket.accept()
     logger.info("WebSocket connected for session %s", session_id)
 
-    # Extract caller from query params or default
-    caller = websocket.query_params.get("caller", "unknown")
-    profile = _lookup_guest(caller)
-    greeting = _build_greeting(profile, session_id)
-
-    bridge = AudioBridge(
-        twilio_ws=websocket,
-        session_id=session_id,
-        caller=caller,
-        profile=profile,
-        greeting=greeting,
-        redis_client=redis_client,
-        kafka_producer=kafka_producer,
-        publish_transcript_fn=_publish_transcript,
-        collect_whispers_fn=_collect_whispers,
-        build_prompt_fn=_build_prompt,
-        system_instruction=AURA_SYSTEM_INSTRUCTION,
-    )
-
     try:
+        # ---- Phase 1: wait for Twilio "start" event ----
+        # Twilio delivers caller via customParameters (set in TwiML <Parameter>).
+        # Query-param fallback kept for the stress-test client.
+        caller = websocket.query_params.get("caller", "unknown")
+        stream_sid: str | None = None
+
+        while True:
+            raw = await websocket.receive_text()
+            msg = json.loads(raw)
+            event = msg.get("event")
+            if event == "start":
+                stream_sid = msg["start"]["streamSid"]
+                custom = msg["start"].get("customParameters", {})
+                if custom.get("caller"):
+                    caller = custom["caller"]
+                logger.info(
+                    "Twilio stream started: streamSid=%s caller=%s session=%s",
+                    stream_sid, caller, session_id,
+                )
+                break
+            elif event == "stop":
+                logger.info("Stream stopped before start for session %s", session_id)
+                return
+
+        # ---- Phase 2: guest lookup + bridge ----
+        profile = _lookup_guest(caller)
+        greeting = _build_greeting(profile, session_id)
+
+        bridge = AudioBridge(
+            twilio_ws=websocket,
+            session_id=session_id,
+            caller=caller,
+            profile=profile,
+            greeting=greeting,
+            redis_client=redis_client,
+            kafka_producer=kafka_producer,
+            publish_transcript_fn=_publish_transcript,
+            collect_whispers_fn=_collect_whispers,
+            build_prompt_fn=_build_prompt,
+            system_instruction=AURA_SYSTEM_INSTRUCTION,
+            stream_sid=stream_sid,
+        )
+
         stats = await bridge.run()
         logger.info(
             "AudioBridge completed for session %s: %d turns",

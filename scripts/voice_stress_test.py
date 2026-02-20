@@ -191,6 +191,9 @@ def _twilio_start_msg(stream_sid: str, session_id: str, caller: str = "+15551234
             "accountSid": "AC_test",
             "from": caller,
             "to": "+15559876543",
+            "customParameters": {
+                "caller": caller,
+            },
         },
     })
 
