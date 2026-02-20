@@ -1,17 +1,19 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 
 import redis
 
 sys.path.insert(0, ".")
+sys.path.insert(0, os.path.join(".", "agents"))
 from agents.sommelier.app.ontology import (
     ALLERGEN_FAMILIES,
     expand_allergen_to_family,
 )
-from agents.sommelier.app.main import (
+from agents.sommelier.app.logic import (
     detect_intent,
     filter_menu_by_exclusion,
     find_pairing,
