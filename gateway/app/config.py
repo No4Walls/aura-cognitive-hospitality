@@ -29,10 +29,19 @@ MAX_RESPONSE_LATENCY_MS = 500
 VOCAL_DELAY_TARGET_MS = 800
 
 # Minimum characters in an interim transcript before triggering barge-in.
-# Prevents background noise ("um", "[noise]") from cancelling Aura's speech.
-BARGE_IN_THRESHOLD = int(os.getenv("BARGE_IN_THRESHOLD", "3"))
+# Prevents background noise ("um", dishes clinking, etc.) from cancelling Aura's speech.
+BARGE_IN_THRESHOLD = int(os.getenv("BARGE_IN_THRESHOLD", "5"))
+
+# WebSocket ping interval (seconds) for Deepgram & ElevenLabs connections.
+WS_PING_INTERVAL = int(os.getenv("WS_PING_INTERVAL", "20"))
+
+# Maximum Deepgram Nova-3 keywords. Excess items are silently dropped.
+DEEPGRAM_KEYWORD_LIMIT = int(os.getenv("DEEPGRAM_KEYWORD_LIMIT", "100"))
 
 # Binary persistence layer: record inbound (guest) and outbound (Aura) audio
 # to WAV files for debugging transcription and barge-in issues.
 RECORD_SESSIONS = os.getenv("RECORD_SESSIONS", "true").lower() in ("true", "1", "yes")
 RECORDINGS_DIR = os.getenv("RECORDINGS_DIR", "/app/recordings")
+RECORDING_MAX_BYTES = int(os.getenv("RECORDING_MAX_BYTES", str(60 * 1024 * 1024)))  # 60 MB
+RECORDING_FLUSH_BYTES = int(os.getenv("RECORDING_FLUSH_BYTES", str(1024 * 1024)))   # 1 MB
+RECORDING_FLUSH_INTERVAL_S = int(os.getenv("RECORDING_FLUSH_INTERVAL_S", "5"))

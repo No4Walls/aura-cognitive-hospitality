@@ -295,16 +295,29 @@ async def _collect_whispers(session_id: str) -> list[dict]:
             if raw:
                 logger.info("Collected %d whisper(s) from %s after %dms", len(raw), session_key, elapsed_ms)
                 for item in raw:
-                    data = json.loads(item)
+                    try:
+                        data = json.loads(item) if isinstance(item, (str, bytes)) else item
+                    except (json.JSONDecodeError, TypeError) as exc:
+                        logger.warning("Skipping malformed whisper item: %s", exc)
+                        continue
+                    if not isinstance(data, dict):
+                        logger.warning("Skipping non-dict whisper item: %s", type(data))
+                        continue
                     WHISPER_COUNT.labels(
                         agent=data.get("agent", "unknown"),
                         whisper_type=data.get("whisper_type", "unknown"),
                     ).inc()
+                    # Safely decode nested payload JSON
+                    raw_payload = data.get("payload", "{}")
+                    try:
+                        payload = json.loads(raw_payload) if isinstance(raw_payload, str) else raw_payload
+                    except (json.JSONDecodeError, TypeError):
+                        payload = {}
                     whispers.append(
                         {
-                            "agent": data["agent"],
-                            "whisper_type": data["whisper_type"],
-                            "payload": json.loads(data.get("payload", "{}")),
+                            "agent": data.get("agent", "unknown"),
+                            "whisper_type": data.get("whisper_type", "unknown"),
+                            "payload": payload if isinstance(payload, dict) else {},
                             "timestamp": float(data.get("timestamp", 0)),
                         }
                     )
