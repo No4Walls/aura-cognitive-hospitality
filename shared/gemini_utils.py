@@ -87,14 +87,32 @@ def warmup() -> None:
     if not _api_keys:
         logger.warning("No GOOGLE_API_KEY set; skipping Gemini warm-up")
         return
+    # Warm up embedding model
     try:
         client = get_client()
         client.models.embed_content(
             model=_DEFAULT_EMBEDDING_MODEL, contents="warmup",
         )
-        logger.info("Gemini warm-up complete (embedding model ready)")
+        logger.info("Gemini warm-up: embedding model ready")
     except Exception as exc:
-        logger.warning("Gemini warm-up failed: %s", exc)
+        logger.warning("Gemini embedding warm-up failed: %s", exc)
+    # Warm up generative model (pre-warms HTTP/TLS connection pool)
+    try:
+        client = get_client()
+        config = types.GenerateContentConfig(
+            system_instruction="You are a test assistant.",
+            temperature=0.0,
+            max_output_tokens=5,
+            safety_settings=default_safety_settings(),
+        )
+        client.models.generate_content(
+            model=_DEFAULT_GENERATIVE_MODEL,
+            contents="Say hello.",
+            config=config,
+        )
+        logger.info("Gemini warm-up: generative model ready")
+    except Exception as exc:
+        logger.warning("Gemini generative warm-up failed: %s", exc)
 
 
 def embed_text(text: str, model: str | None = None) -> list[float]:
@@ -129,3 +147,41 @@ def generate_text(
     if text:
         return text.strip()
     raise RuntimeError("Gemini generate_content returned no text")
+
+
+def generate_text_stream(
+    prompt: str,
+    *,
+    system_instruction: str,
+    model: str | None = None,
+    temperature: float = 0.4,
+    max_output_tokens: int = 300,
+) -> str:
+    """Stream tokens from Gemini and return the assembled response.
+
+    Uses ``generate_content_stream`` so that the first tokens begin arriving
+    before the full response is ready, reducing perceived latency (TTFB).
+    The final assembled string is returned for callers that need the complete
+    text.  Future callers (e.g. live audio) can switch to iterating over the
+    generator directly.
+    """
+    client = get_client()
+    config = types.GenerateContentConfig(
+        system_instruction=system_instruction,
+        temperature=temperature,
+        max_output_tokens=max_output_tokens,
+        safety_settings=default_safety_settings(),
+    )
+    chunks: list[str] = []
+    for chunk in client.models.generate_content_stream(
+        model=model or _DEFAULT_GENERATIVE_MODEL,
+        contents=prompt,
+        config=config,
+    ):
+        part_text = getattr(chunk, "text", None)
+        if part_text:
+            chunks.append(part_text)
+    result = "".join(chunks).strip()
+    if result:
+        return result
+    raise RuntimeError("Gemini streaming returned no text")

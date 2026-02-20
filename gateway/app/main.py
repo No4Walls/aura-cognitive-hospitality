@@ -31,7 +31,7 @@ from shared.redis_utils import (
     GUEST_KEY_PREFIX,
     async_connect_redis,
 )
-from shared.gemini_utils import generate_text, warmup as warmup_gemini
+from shared.gemini_utils import generate_text_stream, warmup as warmup_gemini
 
 import redis
 from confluent_kafka import Producer
@@ -167,7 +167,7 @@ async def simulate_call(request: Request) -> JSONResponse:
     whispers = await _collect_whispers(session_id)
 
     response_text = await asyncio.to_thread(
-        _generate_response, greeting, text, whispers, profile,
+        _generate_response_streaming, greeting, text, whispers, profile,
     )
 
     _publish_transcript(session_id, caller, response_text, "outbound")
@@ -315,12 +315,13 @@ def _build_whisper_context(whispers: list[dict]) -> str:
     return "\n".join(parts)
 
 
-def _generate_response(
+def _build_prompt(
     greeting: str,
     user_text: str,
     whispers: list[dict],
     profile: dict | None,
 ) -> str:
+    """Assemble the Gemini prompt from guest context and whisper data."""
     whisper_block = _build_whisper_context(whispers)
     profile_block = ""
     if profile:
@@ -336,12 +337,21 @@ def _generate_response(
     prompt_parts.append(f"GREETING ALREADY SENT: {greeting}")
     prompt_parts.append(f"GUEST SAYS: {user_text}")
     prompt_parts.append("Respond as Aura (2-3 sentences, warm and concise):")
-    prompt = "\n\n".join(prompt_parts)
+    return "\n\n".join(prompt_parts)
 
+
+def _generate_response_streaming(
+    greeting: str,
+    user_text: str,
+    whispers: list[dict],
+    profile: dict | None,
+) -> str:
+    """Generate a response using Gemini streaming to reduce TTFB."""
+    prompt = _build_prompt(greeting, user_text, whispers, profile)
     try:
-        return generate_text(prompt, system_instruction=AURA_SYSTEM_INSTRUCTION)
+        return generate_text_stream(prompt, system_instruction=AURA_SYSTEM_INSTRUCTION)
     except Exception as exc:
-        logger.warning("Gemini generation failed, using fallback: %s", exc)
+        logger.warning("Gemini streaming generation failed, using fallback: %s", exc)
         return _fallback_response(greeting, user_text, whispers, profile)
 
 
