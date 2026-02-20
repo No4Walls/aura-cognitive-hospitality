@@ -130,15 +130,22 @@ class _SessionRecorder:
         )
 
     def _flush_buffers_sync(self) -> None:
-        """Append PCM buffers to raw files on disk (blocking I/O)."""
+        """Append PCM buffers to raw files on disk (blocking I/O).
+
+        Snapshot buffers to immutable bytes() before writing so the
+        bytearray can safely be extended by the event loop concurrently
+        (avoids BufferError: object cannot be re-sized).
+        """
         if self._in_buf:
-            with open(self._in_raw, "ab") as f:
-                f.write(self._in_buf)
+            data = bytes(self._in_buf)
             self._in_buf.clear()
+            with open(self._in_raw, "ab") as f:
+                f.write(data)
         if self._out_buf:
-            with open(self._out_raw, "ab") as f:
-                f.write(self._out_buf)
+            data = bytes(self._out_buf)
             self._out_buf.clear()
+            with open(self._out_raw, "ab") as f:
+                f.write(data)
         self._last_flush = time.time()
 
     async def maybe_flush(self) -> None:
@@ -233,11 +240,16 @@ def _build_deepgram_url(keyterms: list[str] | None = None) -> str:
 
 
 def _build_elevenlabs_url() -> str:
-    """Build ElevenLabs streaming TTS WebSocket URL."""
+    """Build ElevenLabs streaming TTS WebSocket URL.
+
+    optimize_streaming_latency=4 tells ElevenLabs to prioritise speed
+    over quality — critical for real-time telephony.
+    """
     return (
         f"{_EL_WS_URL}/{ELEVENLABS_VOICE_ID}"
         f"/stream-input?model_id={ELEVENLABS_MODEL_ID}"
         f"&output_format=ulaw_8000"
+        f"&optimize_streaming_latency=4"
     )
 
 
@@ -734,14 +746,24 @@ class AudioBridge:
     # Twilio helpers
     # ------------------------------------------------------------------
     async def _send_twilio_audio(self, audio_b64: str) -> None:
-        """Send a media payload back to Twilio."""
+        """Send a media payload back to Twilio in paced 20ms chunks.
+
+        Twilio expects a steady drip of 160-byte (20ms) mu-law frames.
+        Sending large bursts followed by silence causes choppy playback.
+        """
         if not self._stream_sid:
             return
-        await self._twilio_ws.send_text(json.dumps({
-            "event": "media",
-            "streamSid": self._stream_sid,
-            "media": {"payload": audio_b64},
-        }))
+        raw = base64.b64decode(audio_b64)
+        FRAME_SIZE = 160  # 20ms of 8kHz mu-law
+        for i in range(0, len(raw), FRAME_SIZE):
+            frame = raw[i : i + FRAME_SIZE]
+            payload = base64.b64encode(frame).decode()
+            await self._twilio_ws.send_text(json.dumps({
+                "event": "media",
+                "streamSid": self._stream_sid,
+                "media": {"payload": payload},
+            }))
+            await asyncio.sleep(0.02)  # 20ms pacing heartbeat
 
     async def _send_twilio_clear(self) -> None:
         """Send a clear event to Twilio to stop playback (barge-in)."""
