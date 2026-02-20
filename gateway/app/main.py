@@ -8,6 +8,7 @@ import time
 import uuid
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
+from urllib.parse import quote
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
 from fastapi.responses import JSONResponse, Response
@@ -108,11 +109,14 @@ async def twilio_voice_webhook(request: Request) -> Response:
 
     _publish_transcript(session_id, caller, f"[CALL_START] from {caller}", "inbound")
 
+    # URL-encode the caller number for the query param
+    caller_encoded = quote(caller, safe="")
+
     twiml = (
         '<?xml version="1.0" encoding="UTF-8"?>'
         "<Response>"
         "<Connect>"
-        f'<Stream url="wss://{DOMAIN}/ws/media/{session_id}" />'
+        f'<Stream url="wss://{DOMAIN}/ws/media/{session_id}?caller={caller_encoded}" />'
         "</Connect>"
         "</Response>"
     )
