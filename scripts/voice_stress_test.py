@@ -24,6 +24,14 @@ import struct
 import sys
 import time
 
+# Load .env file so API key detection works outside Docker
+try:
+    from dotenv import load_dotenv  # type: ignore[import-untyped]
+    load_dotenv()
+except ImportError:
+    # python-dotenv not installed — fall back to shell env only
+    pass
+
 try:
     import websockets
 except ImportError:

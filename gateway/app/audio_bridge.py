@@ -202,8 +202,12 @@ _DG_WS_URL = "wss://api.deepgram.com/v1/listen"
 _EL_WS_URL = "wss://api.elevenlabs.io/v1/text-to-speech"
 
 
-def _build_deepgram_url(keywords: list[str] | None = None) -> str:
-    """Build Deepgram WebSocket URL with Nova-3 config and optional keywords."""
+def _build_deepgram_url(keyterms: list[str] | None = None) -> str:
+    """Build Deepgram WebSocket URL with Nova-3 config and optional keyterms.
+
+    Nova-3 uses ``keyterm`` (not ``keywords``) for vocabulary boosting.
+    See https://developers.deepgram.com/docs/keyterm
+    """
     params = [
         "model=nova-3",
         "encoding=mulaw",
@@ -215,16 +219,16 @@ def _build_deepgram_url(keywords: list[str] | None = None) -> str:
         "punctuate=true",
         "smart_format=true",
     ]
-    if keywords:
-        if len(keywords) > DEEPGRAM_KEYWORD_LIMIT:
+    if keyterms:
+        if len(keyterms) > DEEPGRAM_KEYWORD_LIMIT:
             logger.warning(
-                "Keyword list (%d) exceeds Deepgram limit (%d); "
+                "Keyterm list (%d) exceeds Deepgram limit (%d); "
                 "excess items will lose STT boost",
-                len(keywords), DEEPGRAM_KEYWORD_LIMIT,
+                len(keyterms), DEEPGRAM_KEYWORD_LIMIT,
             )
-        for kw in keywords[:DEEPGRAM_KEYWORD_LIMIT]:
+        for kw in keyterms[:DEEPGRAM_KEYWORD_LIMIT]:
             safe = kw.replace(" ", "%20")
-            params.append(f"keywords={safe}:2.0")
+            params.append(f"keyterm={safe}")
     return f"{_DG_WS_URL}?{'&'.join(params)}"
 
 

@@ -9,7 +9,7 @@ from google.genai import types
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_EMBEDDING_MODEL = os.getenv("GEMINI_EMBEDDING_MODEL", "text-embedding-004")
+_DEFAULT_EMBEDDING_MODEL = os.getenv("GEMINI_EMBEDDING_MODEL", "gemini-embedding-001")
 _DEFAULT_GENERATIVE_MODEL = os.getenv("GEMINI_GENERATIVE_MODEL", "gemini-3-flash")
 
 
@@ -74,10 +74,6 @@ def default_safety_settings() -> list[types.SafetySetting]:
         ),
         types.SafetySetting(
             category=types.HarmCategory.HARM_CATEGORY_CIVIC_INTEGRITY,
-            threshold=types.HarmBlockThreshold.BLOCK_NONE,
-        ),
-        types.SafetySetting(
-            category=types.HarmCategory.HARM_CATEGORY_JAILBREAK,
             threshold=types.HarmBlockThreshold.BLOCK_NONE,
         ),
     ]
