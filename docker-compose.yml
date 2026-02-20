@@ -78,6 +78,8 @@ services:
       GEMINI_GENERATIVE_MODEL: ${GEMINI_GENERATIVE_MODEL:-gemini-3-flash}
       GEMINI_EMBEDDING_MODEL: ${GEMINI_EMBEDDING_MODEL:-text-embedding-004}
       DOMAIN: ${DOMAIN:-localhost:8000}
+    volumes:
+      - ./recordings:/app/recordings
     depends_on:
       redis:
         condition: service_healthy
