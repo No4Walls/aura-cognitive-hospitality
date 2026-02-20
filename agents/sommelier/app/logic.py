@@ -20,7 +20,8 @@ def detect_intent(text: str) -> dict | None:
 
     exclusion_keywords = [
         "no ", "without ", "allergic to ", "allergy ", "can't eat ", "cannot eat ",
-        "don't want ", "avoid ", "intolerant ", "sensitive to ", "free from ",
+        "can't have ", "cannot have ", "don't want ", "avoid ", "intolerant ",
+        "sensitive to ", "free from ",
     ]
     for kw in exclusion_keywords:
         if kw in text_lower:
