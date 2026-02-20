@@ -125,14 +125,14 @@ def _linear_to_mulaw(sample: int) -> int:
 # ---------------------------------------------------------------------------
 # Twilio WebSocket protocol helpers
 # ---------------------------------------------------------------------------
-def _twilio_start_msg(stream_sid: str, session_id: str) -> str:
+def _twilio_start_msg(stream_sid: str, session_id: str, caller: str = "+15551234567") -> str:
     return json.dumps({
         "event": "start",
         "start": {
             "streamSid": stream_sid,
             "callSid": f"CA_test_{session_id}",
             "accountSid": "AC_test",
-            "from": "+15551234567",
+            "from": caller,
             "to": "+15559876543",
         },
     })
@@ -159,7 +159,7 @@ def _twilio_stop_msg(stream_sid: str) -> str:
 # Stage 1: Binary Mirror Test
 # ---------------------------------------------------------------------------
 async def stage1_binary_mirror(
-    gateway_url: str, chunks: list[bytes],
+    gateway_url: str, chunks: list[bytes], caller: str = "+15551234567",
 ) -> dict:
     """Stream audio into the Gateway WebSocket and verify connectivity."""
     session_id = f"stress-{int(time.time())}"
@@ -182,7 +182,7 @@ async def stage1_binary_mirror(
             print(f"    WebSocket connected: {ws_url}")
 
             # Send start event
-            await ws.send(_twilio_start_msg(stream_sid, session_id))
+            await ws.send(_twilio_start_msg(stream_sid, session_id, caller))
 
             # Send audio chunks at ~real-time pace
             for i, chunk in enumerate(chunks):
@@ -286,11 +286,12 @@ async def stage2_swarm_integration(
 # Stage 3: Full Julian Voice Validation
 # ---------------------------------------------------------------------------
 async def stage3_full_julian(
-    gateway_url: str, chunks: list[bytes],
+    gateway_url: str, chunks: list[bytes], caller: str = "+15551234567",
 ) -> dict:
     """End-to-end voice test measuring audio-to-audio latency."""
     session_id = f"julian-{int(time.time())}"
-    ws_url = f"{gateway_url}/ws/media/{session_id}?caller=%2B15551234567"
+    from urllib.parse import quote
+    ws_url = f"{gateway_url}/ws/media/{session_id}?caller={quote(caller, safe='')}"
     stream_sid = f"MZ_julian_{session_id}"
 
     has_audio_keys = bool(
@@ -437,6 +438,10 @@ async def main() -> int:
         "--record", action="store_true", default=False,
         help="Check for WAV recordings after test (requires RECORD_SESSIONS=true on Gateway)",
     )
+    parser.add_argument(
+        "--caller", default="+15551234567",
+        help="Caller phone number for VIP recognition (default: +15551234567)",
+    )
     args = parser.parse_args()
 
     print("=" * 60)
@@ -456,7 +461,7 @@ async def main() -> int:
 
     # --- Stage 1: Binary Mirror ---
     print("\n[Stage 1] Binary Mirror Test...")
-    r1 = await stage1_binary_mirror(args.gateway, chunks)
+    r1 = await stage1_binary_mirror(args.gateway, chunks, args.caller)
     _print_result(r1)
     if not r1["pass"]:
         all_pass = False
@@ -470,7 +475,7 @@ async def main() -> int:
 
     # --- Stage 3: Full Julian Voice ---
     print("\n[Stage 3] Full Julian Voice Validation...")
-    r3 = await stage3_full_julian(args.gateway, chunks)
+    r3 = await stage3_full_julian(args.gateway, chunks, args.caller)
     _print_result(r3)
     if not r3["pass"]:
         all_pass = False
