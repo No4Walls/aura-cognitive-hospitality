@@ -120,6 +120,10 @@ def _load_mp3_as_mulaw_chunks(mp3_path: str) -> list[bytes]:
         sys.exit(1)
 
     print(f"  Converting MP3 to 8kHz mono PCM via pydub...")
+    from pydub import AudioSegment
+    AudioSegment.converter = r"C:\ProgramData\chocolatey\bin\ffmpeg.exe"
+    AudioSegment.ffprobe = r"C:\ProgramData\chocolatey\bin\ffprobe.exe"
+    
     seg = AudioSegment.from_mp3(mp3_path)
     seg = seg.set_frame_rate(MULAW_SAMPLE_RATE).set_channels(1).set_sample_width(2)
     raw = seg.raw_data
