@@ -381,6 +381,37 @@ async def stage3_full_julian(
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+async def _check_recordings(gateway_url: str, session_ids: list[str]) -> None:
+    """Query the Gateway for recorded WAV files from test sessions."""
+    http_url = gateway_url.replace("ws://", "http://").replace("wss://", "https://")
+
+    if not httpx:
+        print("    SKIP: httpx not installed (pip install httpx)")
+        return
+
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        for sid in session_ids:
+            if not sid:
+                continue
+            try:
+                resp = await client.get(f"{http_url}/api/recordings/{sid}")
+                if resp.status_code == 200:
+                    data = resp.json()
+                    files = data.get("files", [])
+                    if files:
+                        print(f"\n    Session {sid}:")
+                        for f in files:
+                            print(f"      Recorded: {f}")
+                    else:
+                        print(f"\n    Session {sid}: no recordings")
+                elif resp.status_code == 404:
+                    print(f"\n    Session {sid}: no recordings (RECORD_SESSIONS may be off)")
+                else:
+                    print(f"\n    Session {sid}: HTTP {resp.status_code}")
+            except Exception as exc:
+                print(f"\n    Session {sid}: error checking recordings: {exc}")
+
+
 def _print_result(result: dict) -> None:
     stage = result.get("stage", "unknown")
     passed = result.get("pass", False)
@@ -401,6 +432,10 @@ async def main() -> int:
     parser.add_argument(
         "--wav", default=None,
         help="Path to a mu-law 8kHz WAV file for realistic audio testing",
+    )
+    parser.add_argument(
+        "--record", action="store_true", default=False,
+        help="Check for WAV recordings after test (requires RECORD_SESSIONS=true on Gateway)",
     )
     args = parser.parse_args()
 
@@ -451,6 +486,17 @@ async def main() -> int:
     if r3.get("first_audio_response_ms") is not None:
         print(f"\n  Final Audio-to-Audio Latency: {r3['first_audio_response_ms']}ms")
         print(f"  Target: <{VOCAL_DELAY_TARGET_MS}ms")
+
+    # --- Recording check ---
+    if args.record:
+        print("\n" + "-" * 60)
+        print("  Recording Check (RECORD_SESSIONS)")
+        print("-" * 60)
+        await _check_recordings(args.gateway, [
+            r1.get("session_id", ""),
+            r2.get("session_id", ""),
+            r3.get("session_id", ""),
+        ])
 
     return 0 if all_pass else 1
 

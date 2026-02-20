@@ -14,7 +14,9 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
 from fastapi.responses import JSONResponse, Response
 from prometheus_client import make_asgi_app
 
-from gateway.app.config import DOMAIN
+from pathlib import Path
+
+from gateway.app.config import DOMAIN, RECORD_SESSIONS, RECORDINGS_DIR
 from gateway.app.metrics import (
     ACTIVE_CALLS,
     CALL_COUNT,
@@ -208,6 +210,23 @@ async def simulate_call(request: Request) -> JSONResponse:
             "latency_ms": round(latency_ms, 2),
         }
     )
+
+
+@app.get("/api/recordings/{session_id}")
+async def get_recordings(session_id: str) -> JSONResponse:
+    """List available WAV recordings for a session."""
+    if not RECORD_SESSIONS:
+        return JSONResponse(
+            {"error": "Recording disabled (RECORD_SESSIONS=false)"},
+            status_code=404,
+        )
+    session_dir = Path(RECORDINGS_DIR) / session_id
+    if not session_dir.exists():
+        return JSONResponse(
+            {"session_id": session_id, "files": []}, status_code=404,
+        )
+    files = [str(f) for f in sorted(session_dir.iterdir()) if f.suffix == ".wav"]
+    return JSONResponse({"session_id": session_id, "files": files})
 
 
 def _lookup_guest(caller: str) -> dict | None:

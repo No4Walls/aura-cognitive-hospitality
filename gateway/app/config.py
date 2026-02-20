@@ -31,3 +31,8 @@ VOCAL_DELAY_TARGET_MS = 800
 # Minimum characters in an interim transcript before triggering barge-in.
 # Prevents background noise ("um", "[noise]") from cancelling Aura's speech.
 BARGE_IN_THRESHOLD = int(os.getenv("BARGE_IN_THRESHOLD", "3"))
+
+# Binary persistence layer: record inbound (guest) and outbound (Aura) audio
+# to WAV files for debugging transcription and barge-in issues.
+RECORD_SESSIONS = os.getenv("RECORD_SESSIONS", "true").lower() in ("true", "1", "yes")
+RECORDINGS_DIR = os.getenv("RECORDINGS_DIR", "/app/recordings")

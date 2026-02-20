@@ -10,10 +10,15 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import io
 import json
 import logging
+import os
+import struct
 import threading
 import time
+import wave
+from pathlib import Path
 from typing import AsyncGenerator, Callable
 
 import websockets
@@ -24,12 +29,114 @@ from gateway.app.config import (
     ELEVENLABS_API_KEY,
     ELEVENLABS_VOICE_ID,
     ELEVENLABS_MODEL_ID,
+    RECORD_SESSIONS,
+    RECORDINGS_DIR,
 )
 from gateway.app.metrics import AUDIO_LATENCY
 from shared.gemini_utils import generate_text_stream_iter
 from shared.redis_utils import MENU_KEY_PREFIX
 
 logger = logging.getLogger("aura-gateway.audio")
+
+# ---------------------------------------------------------------------------
+# Mu-law decode table (ITU-T G.711) -> 16-bit signed PCM
+# ---------------------------------------------------------------------------
+_MULAW_DECODE: list[int] = [0] * 256
+for _i in range(256):
+    _inv = ~_i & 0xFF
+    _sign = _inv & 0x80
+    _exp = (_inv >> 4) & 0x07
+    _mantissa = _inv & 0x0F
+    _sample = ((_mantissa << 3) + 0x84) << _exp
+    _sample -= 0x84
+    _MULAW_DECODE[_i] = -_sample if _sign else _sample
+
+
+def _mulaw_to_pcm(mulaw_bytes: bytes) -> bytes:
+    """Convert mu-law audio bytes to 16-bit signed PCM (little-endian)."""
+    pcm = bytearray(len(mulaw_bytes) * 2)
+    for i, b in enumerate(mulaw_bytes):
+        struct.pack_into("<h", pcm, i * 2, _MULAW_DECODE[b])
+    return bytes(pcm)
+
+
+# ---------------------------------------------------------------------------
+# Session recorder: buffers audio in memory, writes WAV at session end
+# ---------------------------------------------------------------------------
+class _SessionRecorder:
+    """Buffers inbound (guest) and outbound (Aura) mu-law audio in memory.
+
+    At session end, converts to 16-bit PCM and writes WAV files via
+    asyncio.to_thread to avoid blocking the event loop.
+    """
+
+    def __init__(self, session_id: str) -> None:
+        self._session_id = session_id
+        self._inbound = bytearray()   # guest mu-law
+        self._outbound = bytearray()  # Aura mu-law
+        self._dir = Path(RECORDINGS_DIR) / session_id
+
+    def append_inbound(self, mulaw_chunk: bytes) -> None:
+        """Buffer inbound (guest) mu-law audio. Called from async loop."""
+        self._inbound.extend(mulaw_chunk)
+
+    def append_outbound(self, mulaw_chunk: bytes) -> None:
+        """Buffer outbound (Aura) mu-law audio. Called from async loop."""
+        self._outbound.extend(mulaw_chunk)
+
+    def _write_wav(self, pcm_data: bytes, filename: str) -> str:
+        """Write PCM data to a WAV file. Returns the file path."""
+        self._dir.mkdir(parents=True, exist_ok=True)
+        path = self._dir / filename
+        with wave.open(str(path), "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)        # 16-bit
+            wf.setframerate(8000)
+            wf.writeframes(pcm_data)
+        return str(path)
+
+    def _flush_sync(self) -> dict[str, str]:
+        """Convert buffers to PCM and write WAV files (blocking I/O)."""
+        paths: dict[str, str] = {}
+        if self._inbound:
+            pcm = _mulaw_to_pcm(bytes(self._inbound))
+            paths["guest_in"] = self._write_wav(
+                pcm, f"guest_in_{self._session_id}.wav",
+            )
+        if self._outbound:
+            pcm = _mulaw_to_pcm(bytes(self._outbound))
+            paths["aura_out"] = self._write_wav(
+                pcm, f"aura_out_{self._session_id}.wav",
+            )
+        return paths
+
+    async def flush(self) -> dict[str, str]:
+        """Write WAV files in a background thread. Returns path dict."""
+        if not self._inbound and not self._outbound:
+            return {}
+        paths = await asyncio.to_thread(self._flush_sync)
+        for label, p in paths.items():
+            logger.info("Recorded %s: %s", label, p)
+        return paths
+
+
+def _cleanup_old_recordings(max_age_hours: int = 24) -> int:
+    """Delete recording directories older than max_age_hours. Returns count."""
+    base = Path(RECORDINGS_DIR)
+    if not base.exists():
+        return 0
+    cutoff = time.time() - max_age_hours * 3600
+    removed = 0
+    for session_dir in base.iterdir():
+        if session_dir.is_dir() and session_dir.stat().st_mtime < cutoff:
+            for f in session_dir.iterdir():
+                f.unlink(missing_ok=True)
+            session_dir.rmdir()
+            removed += 1
+    if removed:
+        logger.info("Cleaned up %d old recording(s)", removed)
+    return removed
+
 
 # ---------------------------------------------------------------------------
 # External service endpoints
@@ -195,6 +302,11 @@ class AudioBridge:
         self._end_of_speech_ts: float = 0.0
         self._first_audio_ts: float = 0.0
 
+        # Binary persistence layer (WAV recorder)
+        self._recorder: _SessionRecorder | None = None
+        if RECORD_SESSIONS:
+            self._recorder = _SessionRecorder(session_id)
+
     # ------------------------------------------------------------------
     # Public entry point
     # ------------------------------------------------------------------
@@ -228,9 +340,21 @@ class AudioBridge:
         except Exception as exc:
             logger.error("AudioBridge error for session %s: %s", self._session_id, exc)
 
+        # Flush recorded audio to WAV files (non-blocking)
+        recording_paths: dict[str, str] = {}
+        if self._recorder:
+            recording_paths = await self._recorder.flush()
+
+        # Opportunistic cleanup of old recordings (>24h)
+        try:
+            await asyncio.to_thread(_cleanup_old_recordings)
+        except Exception:
+            pass
+
         return {
             "session_id": self._session_id,
             "turns": self._turn_count,
+            "recordings": recording_paths,
         }
 
     # ------------------------------------------------------------------
@@ -252,6 +376,8 @@ class AudioBridge:
                     )
                 elif event == "media":
                     audio_bytes = base64.b64decode(msg["media"]["payload"])
+                    if self._recorder:
+                        self._recorder.append_inbound(audio_bytes)
                     if self._dg_ws:
                         await self._dg_ws.send(audio_bytes)
                 elif event == "stop":
@@ -462,6 +588,10 @@ class AudioBridge:
                 if audio_b64:
                     if not self._first_audio_ts:
                         self._first_audio_ts = time.time()
+                    if self._recorder:
+                        self._recorder.append_outbound(
+                            base64.b64decode(audio_b64),
+                        )
                     await self._send_twilio_audio(audio_b64)
                 if msg.get("isFinal"):
                     break
