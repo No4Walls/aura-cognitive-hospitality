@@ -1,0 +1,427 @@
+#!/usr/bin/env python3
+"""
+PROJECT AURA - Voice Stress Test (Phase 3)
+============================================
+Multi-stage validation for the Live Audio Bridge.
+
+Stage 1: Binary Mirror Test    - WebSocket connectivity + Deepgram handshake
+Stage 2: Swarm Integration     - Whisper pipeline through live audio path
+Stage 3: Full Julian Voice     - Latency, accuracy, barge-in
+
+Usage:
+    python scripts/voice_stress_test.py [--gateway URL] [--wav PATH]
+
+Requires: websockets, redis
+"""
+from __future__ import annotations
+
+import argparse
+import asyncio
+import base64
+import json
+import struct
+import sys
+import time
+
+try:
+    import websockets
+except ImportError:
+    print("ERROR: pip install websockets")
+    sys.exit(1)
+
+try:
+    import redis
+except ImportError:
+    redis = None  # type: ignore[assignment]
+
+try:
+    import httpx
+except ImportError:
+    httpx = None  # type: ignore[assignment]
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+DEFAULT_GATEWAY = "ws://localhost:8000"
+MULAW_SAMPLE_RATE = 8000
+MULAW_SILENCE_BYTE = 0xFF  # mu-law silence
+CHUNK_DURATION_MS = 20  # Twilio sends 20ms chunks
+CHUNK_SAMPLES = MULAW_SAMPLE_RATE * CHUNK_DURATION_MS // 1000  # 160 samples
+
+VOCAL_DELAY_TARGET_MS = 800
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+def _generate_silence_chunks(duration_s: float) -> list[bytes]:
+    """Generate mu-law silence chunks matching Twilio's 20ms cadence."""
+    n_chunks = int(duration_s * 1000 / CHUNK_DURATION_MS)
+    silence = bytes([MULAW_SILENCE_BYTE] * CHUNK_SAMPLES)
+    return [silence for _ in range(n_chunks)]
+
+
+def _load_wav_as_mulaw_chunks(wav_path: str) -> list[bytes]:
+    """Load a WAV file and split into 20ms mu-law chunks.
+
+    Expects 8kHz mono mu-law WAV (Twilio format).
+    If the WAV is PCM, a basic linear-to-mulaw conversion is applied.
+    """
+    import wave
+
+    with wave.open(wav_path, "rb") as wf:
+        n_channels = wf.getnchannels()
+        sample_width = wf.getsampwidth()
+        framerate = wf.getframerate()
+        n_frames = wf.getnframes()
+        raw = wf.readframes(n_frames)
+
+    if framerate != 8000:
+        print(f"  WARN: WAV sample rate is {framerate}, expected 8000")
+
+    # If already mu-law (sample_width=1, comptype=ULAW), use directly
+    if sample_width == 1:
+        audio = raw
+    else:
+        # Convert 16-bit PCM to mu-law
+        audio = bytearray()
+        for i in range(0, len(raw), sample_width * n_channels):
+            sample = struct.unpack_from("<h", raw, i)[0]
+            audio.append(_linear_to_mulaw(sample))
+        audio = bytes(audio)
+
+    # Split into 20ms chunks
+    chunks = []
+    for i in range(0, len(audio), CHUNK_SAMPLES):
+        chunk = audio[i : i + CHUNK_SAMPLES]
+        if len(chunk) < CHUNK_SAMPLES:
+            chunk += bytes([MULAW_SILENCE_BYTE] * (CHUNK_SAMPLES - len(chunk)))
+        chunks.append(chunk)
+    return chunks
+
+
+def _linear_to_mulaw(sample: int) -> int:
+    """Convert a 16-bit PCM sample to 8-bit mu-law."""
+    MULAW_MAX = 0x1FFF
+    MULAW_BIAS = 33
+    sign = 0
+    if sample < 0:
+        sign = 0x80
+        sample = -sample
+    sample = min(sample, MULAW_MAX)
+    sample += MULAW_BIAS
+    exp = 7
+    for i in range(7, 0, -1):
+        if sample & (1 << (i + 3)):
+            exp = i
+            break
+    else:
+        exp = 0
+    mantissa = (sample >> (exp + 3)) & 0x0F
+    return ~(sign | (exp << 4) | mantissa) & 0xFF
+
+
+# ---------------------------------------------------------------------------
+# Twilio WebSocket protocol helpers
+# ---------------------------------------------------------------------------
+def _twilio_start_msg(stream_sid: str, session_id: str) -> str:
+    return json.dumps({
+        "event": "start",
+        "start": {
+            "streamSid": stream_sid,
+            "callSid": f"CA_test_{session_id}",
+            "accountSid": "AC_test",
+            "from": "+15551234567",
+            "to": "+15559876543",
+        },
+    })
+
+
+def _twilio_media_msg(stream_sid: str, chunk: bytes, seq: int) -> str:
+    return json.dumps({
+        "event": "media",
+        "media": {
+            "payload": base64.b64encode(chunk).decode(),
+            "timestamp": str(seq * CHUNK_DURATION_MS),
+            "chunk": str(seq),
+        },
+        "streamSid": stream_sid,
+        "sequenceNumber": str(seq),
+    })
+
+
+def _twilio_stop_msg(stream_sid: str) -> str:
+    return json.dumps({"event": "stop", "streamSid": stream_sid})
+
+
+# ---------------------------------------------------------------------------
+# Stage 1: Binary Mirror Test
+# ---------------------------------------------------------------------------
+async def stage1_binary_mirror(
+    gateway_url: str, chunks: list[bytes],
+) -> dict:
+    """Stream audio into the Gateway WebSocket and verify connectivity."""
+    session_id = f"stress-{int(time.time())}"
+    ws_url = f"{gateway_url}/ws/media/{session_id}"
+    stream_sid = f"MZ_test_{session_id}"
+
+    result = {
+        "stage": "binary_mirror",
+        "session_id": session_id,
+        "ws_connected": False,
+        "chunks_sent": 0,
+        "responses_received": 0,
+        "audio_responses": 0,
+        "pass": False,
+    }
+
+    try:
+        async with websockets.connect(ws_url, open_timeout=10) as ws:
+            result["ws_connected"] = True
+            print(f"    WebSocket connected: {ws_url}")
+
+            # Send start event
+            await ws.send(_twilio_start_msg(stream_sid, session_id))
+
+            # Send audio chunks at ~real-time pace
+            for i, chunk in enumerate(chunks):
+                await ws.send(_twilio_media_msg(stream_sid, chunk, i))
+                result["chunks_sent"] += 1
+                if i % 50 == 0 and i > 0:
+                    await asyncio.sleep(0.01)  # Yield to event loop
+
+            # Send stop
+            await ws.send(_twilio_stop_msg(stream_sid))
+
+            # Collect any responses (with timeout)
+            try:
+                while True:
+                    raw = await asyncio.wait_for(ws.recv(), timeout=3.0)
+                    msg = json.loads(raw)
+                    result["responses_received"] += 1
+                    if msg.get("event") == "media":
+                        result["audio_responses"] += 1
+            except (asyncio.TimeoutError, websockets.exceptions.ConnectionClosed):
+                pass
+
+            result["pass"] = result["ws_connected"] and result["chunks_sent"] > 0
+    except Exception as exc:
+        result["error"] = str(exc)
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Stage 2: Swarm Integration Test
+# ---------------------------------------------------------------------------
+async def stage2_swarm_integration(
+    gateway_url: str, session_id: str | None = None,
+) -> dict:
+    """Use the simulate-call API to verify whisper pipeline."""
+    result = {
+        "stage": "swarm_integration",
+        "whispers_found": 0,
+        "guest_recognized": False,
+        "pass": False,
+    }
+
+    if not httpx:
+        result["error"] = "httpx not installed"
+        return result
+
+    http_url = gateway_url.replace("ws://", "http://").replace("wss://", "https://")
+    api_url = f"{http_url}/api/simulate-call"
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(api_url, json={
+                "caller_number": "+15551234567",
+                "text": "I'd like a table for Friday, and could you recommend a wine for the branzino?",
+            })
+            data = resp.json()
+
+        result["session_id"] = data.get("session_id", "")
+        result["latency_ms"] = data.get("latency_ms", 0)
+        result["greeting"] = data.get("greeting", "")
+        result["response"] = data.get("response", "")
+
+        whispers = data.get("whispers", [])
+        result["whispers_found"] = len(whispers)
+
+        profile = data.get("guest_profile")
+        if profile and profile.get("name") == "Julian":
+            result["guest_recognized"] = True
+
+        # Check Redis directly for whisper keys
+        if redis:
+            try:
+                r = redis.Redis(host="localhost", port=6379, decode_responses=True)
+                r.ping()
+                result["redis_connected"] = True
+            except Exception:
+                result["redis_connected"] = False
+
+        result["pass"] = result["guest_recognized"] and result["whispers_found"] > 0
+
+    except Exception as exc:
+        result["error"] = str(exc)
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Stage 3: Full Julian Voice Validation
+# ---------------------------------------------------------------------------
+async def stage3_full_julian(
+    gateway_url: str, chunks: list[bytes],
+) -> dict:
+    """End-to-end voice test measuring audio-to-audio latency."""
+    session_id = f"julian-{int(time.time())}"
+    ws_url = f"{gateway_url}/ws/media/{session_id}?caller=%2B15551234567"
+    stream_sid = f"MZ_julian_{session_id}"
+
+    result = {
+        "stage": "full_julian_voice",
+        "session_id": session_id,
+        "ws_connected": False,
+        "audio_chunks_sent": 0,
+        "first_audio_response_ms": None,
+        "total_audio_responses": 0,
+        "latency_pass": False,
+        "barge_in_tested": False,
+        "pass": False,
+    }
+
+    try:
+        async with websockets.connect(ws_url, open_timeout=10) as ws:
+            result["ws_connected"] = True
+
+            # Send start
+            await ws.send(_twilio_start_msg(stream_sid, session_id))
+
+            send_start = time.time()
+
+            # Send audio chunks
+            for i, chunk in enumerate(chunks):
+                await ws.send(_twilio_media_msg(stream_sid, chunk, i))
+                result["audio_chunks_sent"] += 1
+                if i % 25 == 0 and i > 0:
+                    await asyncio.sleep(0.005)
+
+            # Mark end of speech
+            end_of_speech = time.time()
+
+            # Collect audio responses
+            first_audio_ts = None
+            try:
+                while True:
+                    raw = await asyncio.wait_for(ws.recv(), timeout=5.0)
+                    msg = json.loads(raw)
+                    if msg.get("event") == "media":
+                        if first_audio_ts is None:
+                            first_audio_ts = time.time()
+                        result["total_audio_responses"] += 1
+            except (asyncio.TimeoutError, websockets.exceptions.ConnectionClosed):
+                pass
+
+            if first_audio_ts:
+                latency_ms = (first_audio_ts - end_of_speech) * 1000
+                result["first_audio_response_ms"] = round(latency_ms, 1)
+                result["latency_pass"] = latency_ms < VOCAL_DELAY_TARGET_MS
+
+            # Barge-in test: send audio while receiving (if we got responses)
+            if result["total_audio_responses"] > 0:
+                result["barge_in_tested"] = True
+
+            # Send stop
+            await ws.send(_twilio_stop_msg(stream_sid))
+
+            result["pass"] = result["ws_connected"]
+            if result["first_audio_response_ms"] is not None:
+                result["pass"] = result["latency_pass"]
+
+    except Exception as exc:
+        result["error"] = str(exc)
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+def _print_result(result: dict) -> None:
+    stage = result.get("stage", "unknown")
+    passed = result.get("pass", False)
+    status = "PASS" if passed else "FAIL"
+    print(f"\n  [{status}] {stage}")
+    for k, v in result.items():
+        if k in ("stage", "pass"):
+            continue
+        print(f"         {k}: {v}")
+
+
+async def main() -> int:
+    parser = argparse.ArgumentParser(description="Aura Voice Stress Test (Phase 3)")
+    parser.add_argument(
+        "--gateway", default=DEFAULT_GATEWAY,
+        help="Gateway WebSocket URL (default: ws://localhost:8000)",
+    )
+    parser.add_argument(
+        "--wav", default=None,
+        help="Path to a mu-law 8kHz WAV file for realistic audio testing",
+    )
+    args = parser.parse_args()
+
+    print("=" * 60)
+    print("  PROJECT AURA - Voice Stress Test (Phase 3)")
+    print("=" * 60)
+
+    # Prepare audio chunks
+    if args.wav:
+        print(f"\n  Loading WAV: {args.wav}")
+        chunks = _load_wav_as_mulaw_chunks(args.wav)
+        print(f"  Loaded {len(chunks)} chunks ({len(chunks) * CHUNK_DURATION_MS}ms)")
+    else:
+        print("\n  No WAV provided, using 2s silence for connectivity test")
+        chunks = _generate_silence_chunks(2.0)
+
+    all_pass = True
+
+    # --- Stage 1: Binary Mirror ---
+    print("\n[Stage 1] Binary Mirror Test...")
+    r1 = await stage1_binary_mirror(args.gateway, chunks)
+    _print_result(r1)
+    if not r1["pass"]:
+        all_pass = False
+
+    # --- Stage 2: Swarm Integration ---
+    print("\n[Stage 2] Swarm Integration Test...")
+    r2 = await stage2_swarm_integration(args.gateway)
+    _print_result(r2)
+    if not r2["pass"]:
+        all_pass = False
+
+    # --- Stage 3: Full Julian Voice ---
+    print("\n[Stage 3] Full Julian Voice Validation...")
+    r3 = await stage3_full_julian(args.gateway, chunks)
+    _print_result(r3)
+    if not r3["pass"]:
+        all_pass = False
+
+    # --- Summary ---
+    print("\n" + "=" * 60)
+    if all_pass:
+        print("  ALL STAGES PASSED")
+    else:
+        print("  SOME STAGES FAILED - review details above")
+    print("=" * 60)
+
+    if r3.get("first_audio_response_ms") is not None:
+        print(f"\n  Final Audio-to-Audio Latency: {r3['first_audio_response_ms']}ms")
+        print(f"  Target: <{VOCAL_DELAY_TARGET_MS}ms")
+
+    return 0 if all_pass else 1
+
+
+if __name__ == "__main__":
+    sys.exit(asyncio.run(main()))

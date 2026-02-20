@@ -38,3 +38,9 @@ KAFKA_EVENTS = Counter(
     "Total events published to Kafka",
     ["topic"],
 )
+
+AUDIO_LATENCY = Histogram(
+    "aura_audio_to_audio_latency_seconds",
+    "End-of-speech to first AI audio packet latency",
+    buckets=[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 1.0, 1.5, 2.0],
+)

@@ -149,6 +149,32 @@ def generate_text(
     raise RuntimeError("Gemini generate_content returned no text")
 
 
+def generate_text_stream_iter(
+    prompt: str,
+    *,
+    system_instruction: str,
+    model: str | None = None,
+    temperature: float = 0.4,
+    max_output_tokens: int = 300,
+):
+    """Yield text chunks from Gemini streaming for live audio piping."""
+    client = get_client()
+    config = types.GenerateContentConfig(
+        system_instruction=system_instruction,
+        temperature=temperature,
+        max_output_tokens=max_output_tokens,
+        safety_settings=default_safety_settings(),
+    )
+    for chunk in client.models.generate_content_stream(
+        model=model or _DEFAULT_GENERATIVE_MODEL,
+        contents=prompt,
+        config=config,
+    ):
+        part_text = getattr(chunk, "text", None)
+        if part_text:
+            yield part_text
+
+
 def generate_text_stream(
     prompt: str,
     *,

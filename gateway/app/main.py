@@ -10,9 +10,10 @@ from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from prometheus_client import make_asgi_app
 
+from gateway.app.config import DOMAIN
 from gateway.app.metrics import (
     ACTIVE_CALLS,
     CALL_COUNT,
@@ -22,6 +23,7 @@ from gateway.app.metrics import (
     TOKEN_USAGE,
     WHISPER_COUNT,
 )
+from gateway.app.audio_bridge import AudioBridge
 
 from shared.kafka_utils import (
     TRANSCRIPT_TOPIC,
@@ -95,7 +97,7 @@ async def health() -> dict:
 
 
 @app.post("/twilio/voice")
-async def twilio_voice_webhook(request: Request) -> JSONResponse:
+async def twilio_voice_webhook(request: Request) -> Response:
     form_data = await request.form()
     caller = form_data.get("From", "unknown")
     session_id = str(uuid.uuid4())
@@ -104,23 +106,18 @@ async def twilio_voice_webhook(request: Request) -> JSONResponse:
     ACTIVE_CALLS.inc()
     logger.info("Incoming call from %s, session=%s", caller, session_id)
 
-    profile = _lookup_guest(caller)
-    greeting = _build_greeting(profile, session_id)
-
     _publish_transcript(session_id, caller, f"[CALL_START] from {caller}", "inbound")
 
-    twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-    <Say voice="alice">{greeting}</Say>
-    <Connect>
-        <Stream url="wss://{{{{request.url.hostname}}}}/ws/media/{session_id}" />
-    </Connect>
-</Response>"""
-
-    return JSONResponse(
-        content={"session_id": session_id, "greeting": greeting, "twiml": twiml},
-        media_type="application/json",
+    twiml = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        "<Response>"
+        "<Connect>"
+        f'<Stream url="wss://{DOMAIN}/ws/media/{session_id}" />'
+        "</Connect>"
+        "</Response>"
     )
+
+    return Response(content=twiml, media_type="application/xml")
 
 
 @app.websocket("/ws/media/{session_id}")
@@ -128,21 +125,35 @@ async def media_stream(websocket: WebSocket, session_id: str) -> None:
     await websocket.accept()
     logger.info("WebSocket connected for session %s", session_id)
 
-    try:
-        while True:
-            data = await websocket.receive_text()
-            message = json.loads(data)
-            event_type = message.get("event")
+    # Extract caller from query params or default
+    caller = websocket.query_params.get("caller", "unknown")
+    profile = _lookup_guest(caller)
+    greeting = _build_greeting(profile, session_id)
 
-            if event_type == "media":
-                await _handle_media(session_id, message)
-            elif event_type == "start":
-                logger.info("Stream started for session %s", session_id)
-            elif event_type == "stop":
-                logger.info("Stream stopped for session %s", session_id)
-                break
+    bridge = AudioBridge(
+        twilio_ws=websocket,
+        session_id=session_id,
+        caller=caller,
+        profile=profile,
+        greeting=greeting,
+        redis_client=redis_client,
+        kafka_producer=kafka_producer,
+        publish_transcript_fn=_publish_transcript,
+        collect_whispers_fn=_collect_whispers,
+        build_prompt_fn=_build_prompt,
+        system_instruction=AURA_SYSTEM_INSTRUCTION,
+    )
+
+    try:
+        stats = await bridge.run()
+        logger.info(
+            "AudioBridge completed for session %s: %d turns",
+            session_id, stats.get("turns", 0),
+        )
     except WebSocketDisconnect:
         logger.info("WebSocket disconnected for session %s", session_id)
+    except Exception as exc:
+        logger.error("AudioBridge failed for session %s: %s", session_id, exc)
     finally:
         ACTIVE_CALLS.dec()
 
@@ -424,7 +435,3 @@ def _fallback_response(
             return f"Of course! {sommelier_hint}"
 
     return "I'd be delighted to help you. Could you tell me a bit more about what you're looking for?"
-
-
-async def _handle_media(session_id: str, message: dict) -> None:
-    logger.debug("Processing media chunk for session %s", session_id)
