@@ -70,11 +70,16 @@ services:
       TENANT_ID: ${TENANT_ID:-default}
       TWILIO_ACCOUNT_SID: ${TWILIO_ACCOUNT_SID:-}
       TWILIO_AUTH_TOKEN: ${TWILIO_AUTH_TOKEN:-}
+      DEEPGRAM_API_KEY: ${DEEPGRAM_API_KEY:-}
       ELEVENLABS_API_KEY: ${ELEVENLABS_API_KEY:-}
       ELEVENLABS_VOICE_ID: ${ELEVENLABS_VOICE_ID:-}
+      ELEVENLABS_MODEL_ID: ${ELEVENLABS_MODEL_ID:-eleven_flash_v2_5}
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
       GEMINI_GENERATIVE_MODEL: ${GEMINI_GENERATIVE_MODEL:-gemini-3-flash}
-      GEMINI_EMBEDDING_MODEL: ${GEMINI_EMBEDDING_MODEL:-text-embedding-004}
+      GEMINI_EMBEDDING_MODEL: ${GEMINI_EMBEDDING_MODEL:-gemini-embedding-001}
+      DOMAIN: ${DOMAIN:-localhost:8000}
+    volumes:
+      - ./recordings:/app/recordings
     depends_on:
       redis:
         condition: service_healthy
@@ -96,7 +101,7 @@ services:
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       TENANT_ID: ${TENANT_ID:-default}
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
-      GEMINI_EMBEDDING_MODEL: ${GEMINI_EMBEDDING_MODEL:-text-embedding-004}
+      GEMINI_EMBEDDING_MODEL: ${GEMINI_EMBEDDING_MODEL:-gemini-embedding-001}
     depends_on:
       redis:
         condition: service_healthy

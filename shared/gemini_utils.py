@@ -9,7 +9,7 @@ from google.genai import types
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_EMBEDDING_MODEL = os.getenv("GEMINI_EMBEDDING_MODEL", "text-embedding-004")
+_DEFAULT_EMBEDDING_MODEL = os.getenv("GEMINI_EMBEDDING_MODEL", "gemini-embedding-001")
 _DEFAULT_GENERATIVE_MODEL = os.getenv("GEMINI_GENERATIVE_MODEL", "gemini-3-flash")
 
 
@@ -74,10 +74,6 @@ def default_safety_settings() -> list[types.SafetySetting]:
         ),
         types.SafetySetting(
             category=types.HarmCategory.HARM_CATEGORY_CIVIC_INTEGRITY,
-            threshold=types.HarmBlockThreshold.BLOCK_NONE,
-        ),
-        types.SafetySetting(
-            category=types.HarmCategory.HARM_CATEGORY_JAILBREAK,
             threshold=types.HarmBlockThreshold.BLOCK_NONE,
         ),
     ]
@@ -147,6 +143,32 @@ def generate_text(
     if text:
         return text.strip()
     raise RuntimeError("Gemini generate_content returned no text")
+
+
+def generate_text_stream_iter(
+    prompt: str,
+    *,
+    system_instruction: str,
+    model: str | None = None,
+    temperature: float = 0.4,
+    max_output_tokens: int = 300,
+):
+    """Yield text chunks from Gemini streaming for live audio piping."""
+    client = get_client()
+    config = types.GenerateContentConfig(
+        system_instruction=system_instruction,
+        temperature=temperature,
+        max_output_tokens=max_output_tokens,
+        safety_settings=default_safety_settings(),
+    )
+    for chunk in client.models.generate_content_stream(
+        model=model or _DEFAULT_GENERATIVE_MODEL,
+        contents=prompt,
+        config=config,
+    ):
+        part_text = getattr(chunk, "text", None)
+        if part_text:
+            yield part_text
 
 
 def generate_text_stream(
